@@ -42,6 +42,34 @@ data class ModelVoxel(val x: Int, val y: Int, val z: Int, val color: Color, val 
 // Struktura dla innych graczy (Multiplayer)
 data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0)
 
+abstract class Entity(
+    var x: Double, var y: Double, var z: Double,
+    var yaw: Double = 0.0, var pitch: Double = 0.0,
+    var velX: Double = 0.0, var velY: Double = 0.0, var velZ: Double = 0.0,
+    val scale: Double = 1.0,
+    var onGround: Boolean = false,
+    open var shadowRadius: Double = 0.0
+) {
+    // Hitbox relative to the entity's position (x,y,z) as its center
+    abstract val hitboxMin: Vector3d
+    abstract val hitboxMax: Vector3d
+
+    fun getHitboxAABB(): Pair<Vector3d, Vector3d> {
+        val min = Vector3d(x + hitboxMin.x * scale, y + hitboxMin.y * scale, z + hitboxMin.z * scale)
+        val max = Vector3d(x + hitboxMax.x * scale, y + hitboxMax.y * scale, z + hitboxMax.z * scale)
+        return Pair(min, max)
+    }
+}
+
+data class ItemEntity(val itemStack: ItemStack, private val initialX: Double, private val initialY: Double, private val initialZ: Double, var pickupDelay: Int = 0) : Entity(initialX, initialY, initialZ, scale = 0.25) {
+    override val hitboxMin: Vector3d = Vector3d(-1.25, -1.25, -1.25) // Based on a 1x1x1 cube before scaling
+    override val hitboxMax: Vector3d = Vector3d(1.25, 1.25, 1.25)
+    override var shadowRadius: Double = 0.3
+    var age = 0L
+    var isBeingPickedUp = false
+    var pickupAnimationTicks = 0
+}
+
 // --- Stany gry i elementy UI ---
 enum class GameState {
     MAIN_MENU, WORLD_SELECTION, MULTIPLAYER, CREATE_WORLD, IN_GAME, PAUSED
@@ -63,6 +91,7 @@ data class Chunk(val x: Int, val z: Int) {
     val metadata = ByteArray(width * height * depth)
     var modified = false
     var hasBlocks = false // Optymalizacja: Czy chunk zawiera jakiekolwiek bloki?
+    val storedEntities = java.util.ArrayList<Entity>()
 
     fun getIndex(x: Int, y: Int, z: Int): Int = x + width * (z + depth * y)
     fun setBlock(x: Int, y: Int, z: Int, color: Int) {
@@ -302,6 +331,9 @@ class KapeLuz : JPanel() {
     var inventory = arrayOfNulls<ItemStack>(9)
     var selectedSlot = 0
     private val pendingItems = ConcurrentLinkedQueue<Pair<String, Int>>()
+
+    // --- Byty (Entities) ---
+    private val entities = ConcurrentLinkedQueue<Entity>()
 
     // --- Threading & Optimization ---
     // Zmiana: Zostawiamy 2 rdzenie wolne (dla renderowania i systemu) oraz ustawiamy niski priorytet
@@ -849,9 +881,24 @@ class KapeLuz : JPanel() {
 
     private fun saveAndExitToMenu() {
         println("Saving modified chunks...")
-        chunks.values.filter { it.modified }.forEach { chunk ->
-            chunkIO.saveChunk(chunk, localDimension)
-            chunk.modified = false
+        val entitiesByChunk = entities.groupBy {
+            val bx = floor(it.x / cubeSize).toInt()
+            val cx = if (bx >= 0) bx / 16 else (bx + 1) / 16 - 1
+            val bz = floor(it.z / cubeSize).toInt()
+            val cz = if (bz >= 0) bz / 16 else (bz + 1) / 16 - 1
+            Point(cx, cz)
+        }
+
+        chunks.forEach { (p, chunk) ->
+            val ent = entitiesByChunk[p]
+            if (ent != null) {
+                chunk.storedEntities.addAll(ent)
+                chunk.modified = true
+            }
+            if (chunk.modified) {
+                chunkIO.saveChunk(chunk, localDimension)
+                chunk.modified = false
+            }
         }
         chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension))
         println("All modified chunks saved.")
@@ -886,6 +933,8 @@ class KapeLuz : JPanel() {
         yaw = 0.0; pitch = 0.0
         inputManager.releaseMouse()
         inputManager.resetInputState()
+
+        entities.clear()
 
         // Reset WebRTC
         peerConnections.values.forEach { it.close() }
@@ -977,7 +1026,13 @@ class KapeLuz : JPanel() {
         if (!isClient) {
             val startCx = floor(camX / 32.0).toInt()
             val startCz = floor(camZ / 32.0).toInt()
-            chunks[Point(startCx, startCz)] = generateChunk(startCx, startCz)
+            val startChunk = generateChunk(startCx, startCz)
+            chunks[Point(startCx, startCz)] = startChunk
+
+            if (startChunk.storedEntities.isNotEmpty()) {
+                entities.addAll(startChunk.storedEntities)
+                startChunk.storedEntities.clear()
+            }
         }
         isMultiplayerClient = isClient
 
@@ -1471,6 +1526,12 @@ class KapeLuz : JPanel() {
                     newChunk.hasBlocks = true
                     chunks[p] = newChunk
 
+                    // --- LOAD ENTITIES ---
+                    if (newChunk.storedEntities.isNotEmpty()) {
+                        entities.addAll(newChunk.storedEntities)
+                        newChunk.storedEntities.clear()
+                    }
+
                     // Ujednolicenie logiki: Używamy tej samej, solidnej funkcji co multiplayer.
                     // refreshChunkData zajmie się nowym chunkiem ORAZ jego sąsiadami,
                     // zapewniając poprawne oświetlenie i usunięcie "szwów".
@@ -1507,22 +1568,27 @@ class KapeLuz : JPanel() {
         toRemove.forEach {
             // Jeśli chunk był modyfikowany przez gracza, zapisz go na dysk przed usunięciem z RAM
             val chunk = chunks[it]
-            if (chunk != null && chunk.modified) chunkIO.saveChunk(chunk, localDimension)
+            if (chunk != null) {
+                // Save entities belonging to this chunk
+                val chunkEntities = entities.filter { e ->
+                    val bx = floor(e.x / cubeSize).toInt()
+                    val cx = if (bx >= 0) bx / 16 else (bx + 1) / 16 - 1
+                    val bz = floor(e.z / cubeSize).toInt()
+                    val cz = if (bz >= 0) bz / 16 else (bz + 1) / 16 - 1
+                    cx == it.x && cz == it.y
+                }
+                if (chunkEntities.isNotEmpty()) {
+                    chunk.storedEntities.addAll(chunkEntities)
+                    entities.removeAll(chunkEntities)
+                    chunk.modified = true
+                }
+                if (chunk.modified) chunkIO.saveChunk(chunk, localDimension)
+            }
 
             chunks.remove(it)
             chunkMeshes.remove(it)
             chunkOcclusion.remove(it)
         }
-    }
-
-    private fun getNeighborChunks(cx: Int, cz: Int): List<Point> {
-        return listOf(
-            // Krok 1: Bezpośredni sąsiedzi (Krzyż) - muszą być pierwsi!
-            Point(cx + 1, cz), Point(cx - 1, cz), Point(cx, cz + 1), Point(cx, cz - 1),
-            // Krok 2: Sąsiedzi diagonalni (Rogi)
-            // Pobierają światło od bezpośrednich sąsiadów, którzy chwilę wcześniej zostali zaktualizowani.
-            Point(cx + 1, cz + 1), Point(cx - 1, cz - 1), Point(cx - 1, cz + 1), Point(cx + 1, cz - 1)
-        )
     }
 
     // Dodano parametr changedBlocks dla operacji masowych (np. płyny)
@@ -1773,11 +1839,72 @@ class KapeLuz : JPanel() {
 
     // --- System dodawania przedmiotów (API) ---
 
+    // Sprawdza, czy w ekwipunku jest miejsce na przedmiot, bez faktycznego dodawania go.
+    fun canAddItem(id: Int, count: Int): Boolean {
+        if (gameState != GameState.IN_GAME) return false
+        if (id == 0) return false
+
+        var remaining = count
+
+        // 1. Sprawdzenie istniejących stacków
+        for (i in inventory.indices) {
+            if (remaining <= 0) break
+            val stack = inventory[i]
+            if (stack != null && stack.color == id && stack.count < 64) {
+                val space = 64 - stack.count
+                val toAdd = minOf(space, remaining)
+                remaining -= toAdd
+            }
+        }
+
+        // 2. Sprawdzenie pustych slotów
+        for (i in inventory.indices) {
+            if (remaining <= 0) break
+            if (inventory[i] == null) {
+                val toAdd = minOf(64, remaining)
+                remaining -= toAdd
+            }
+        }
+        // Jeśli mogliśmy dodać chociaż jeden przedmiot, `remaining` będzie mniejsze od `count`.
+        return remaining < count
+    }
+
+    fun addItem(id: Int, count: Int): Int {
+        if (gameState != GameState.IN_GAME) return count
+
+        if (id == 0) return count
+
+        var remaining = count
+
+        // 1. Uzupełnianie istniejących stacków
+        for (i in inventory.indices) {
+            if (remaining <= 0) break
+            val stack = inventory[i]
+            if (stack != null && stack.color == id && stack.count < 64) {
+                val space = 64 - stack.count
+                val toAdd = minOf(space, remaining)
+                stack.count += toAdd
+                remaining -= toAdd
+            }
+        }
+
+        // 2. Wypełnianie pustych slotów
+        for (i in inventory.indices) {
+            if (remaining <= 0) break
+            if (inventory[i] == null) {
+                val toAdd = minOf(64, remaining)
+                inventory[i] = ItemStack(id, toAdd)
+                remaining -= toAdd
+            }
+        }
+        return remaining
+    }
+
     // Uniwersalna funkcja addItem przyjmująca String (ID lub HEX)
-    fun addItem(value: String, count: Int = 1) {
+    fun addItem(value: String, count: Int = 1): Int {
         if (gameState != GameState.IN_GAME) {
             pendingItems.add(value to count)
-            return
+            return 0
         }
 
         val id = try {
@@ -1803,32 +1930,10 @@ class KapeLuz : JPanel() {
             }
         } catch (e: Exception) {
             println("Błąd: Nieprawidłowa wartość przedmiotu '$value' (${e.message})")
-            return
+            return count
         }
 
-        if (id == 0) return // Ignorujemy ID 0 (powietrze)
-
-        repeat(count) {
-            // 1. Szukamy istniejącego stacka z tym samym kolorem, który ma mniej niż 64
-            var added = false
-            for (i in inventory.indices) {
-                val stack = inventory[i]
-                if (stack != null && stack.color == id && stack.count < 64) {
-                    stack.count++
-                    added = true
-                    break
-                }
-            }
-            // 2. Jeśli nie znaleziono pasującego stacka, szukamy pierwszego wolnego slotu
-            if (!added) {
-                for (i in inventory.indices) {
-                    if (inventory[i] == null) {
-                        inventory[i] = ItemStack(id, 1)
-                        break
-                    }
-                }
-            }
-        }
+        return addItem(id, count)
     }
 
     // --- API dla Modów: Stawianie struktur ---
@@ -1848,6 +1953,30 @@ class KapeLuz : JPanel() {
         val cx = if (x >= 0) x / 16 else (x + 1) / 16 - 1
         val cz = if (z >= 0) z / 16 else (z + 1) / 16 - 1
         refreshChunkData(cx, cz)
+    }
+
+    private fun dropSelectedItem() {
+        val stack = inventory[selectedSlot] ?: return
+        if (stack.count <= 0) return
+
+        // Create a copy of the item to be dropped, but with count 1
+        val droppedItemStack = stack.copy(count = 1)
+
+        // Calculate spawn position and velocity
+        // Spawn from the camera, not inside the player's head
+        val spawnX = camX + sin(yaw) * cos(pitch) * 0.8
+        val spawnY = viewY + sin(pitch) * 0.5
+        val spawnZ = camZ + cos(yaw) * cos(pitch) * 0.8
+
+        val itemEntity = ItemEntity(droppedItemStack, spawnX, spawnY, spawnZ, pickupDelay = 40) // 40 ticków = 2 sekundy
+
+        // Give it velocity away from the player
+        val throwSpeed = 0.4
+        itemEntity.velX = sin(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
+        itemEntity.velY = sin(pitch) * throwSpeed + 0.15
+        itemEntity.velZ = cos(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
+        entities.add(itemEntity)
+        consumeCurrentItem()
     }
 
     private fun consumeCurrentItem() {
@@ -2024,8 +2153,17 @@ class KapeLuz : JPanel() {
                 val cz = if (z >= 0) z / 16 else (z + 1) / 16 - 1
                 val chunk = chunks[Point(cx, cz)]
                 val rawBlock = getRawBlockFromChunk(chunk, x, y, z)
-                if (rawBlock != 0) addItem(rawBlock.toString())
-
+                if (rawBlock != 0) {
+                    // Zamiast dodawać od razu, tworzymy ItemEntity
+                    val itemStack = ItemStack(rawBlock, 1)
+                    // Pozycja środka bloku: (x + 0.5) * cubeSize, Y przesunięte o -10.0
+                    val spawnX = (x) * cubeSize
+                    val spawnY = (y) * cubeSize - 10.0
+                    val spawnZ = (z) * cubeSize
+                    // Timeout 10 ticków (0.5s), brak prędkości początkowej (tylko grawitacja w updateEntities)
+                    val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                    entities.add(itemEntity)
+                }
                 setBlock(x, y, z, 0)
 
                 // Optymalizacja: Przekazujemy lokalne współrzędne
@@ -2123,7 +2261,14 @@ class KapeLuz : JPanel() {
                     val cz = if (z >= 0) z / 16 else (z + 1) / 16 - 1
                     val chunk = chunks[Point(cx, cz)]
                     val rawBlock = getRawBlockFromChunk(chunk, x, y, z)
-                    if (rawBlock != 0) addItem(rawBlock.toString())
+                    if (rawBlock != 0) {
+                        val itemStack = ItemStack(rawBlock, 1)
+                        val spawnX = (x) * cubeSize
+                        val spawnY = (y) * cubeSize - 10.0
+                        val spawnZ = (z) * cubeSize
+                        val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                        entities.add(itemEntity)
+                    }
 
                     setBlock(x, y, z, 0)
 
@@ -2540,6 +2685,269 @@ class KapeLuz : JPanel() {
                 addTri(4, 5, 1, 0, 0.4, aoValues, lightLevel)
             }
         }
+    }
+
+    // --- System Bytów (Entities) ---
+    private fun updateEntities() {
+        val iterator = entities.iterator()
+        while (iterator.hasNext()) {
+            val entity = iterator.next()
+
+            // --- UNLOADED CHUNK CHECK ---
+            val bx = floor(entity.x / cubeSize).toInt()
+            val cx = if (bx >= 0) bx / 16 else (bx + 1) / 16 - 1
+            val bz = floor(entity.z / cubeSize).toInt()
+            val cz = if (bz >= 0) bz / 16 else (bz + 1) / 16 - 1
+
+            if (!chunks.containsKey(Point(cx, cz))) {
+                // Chunk is not loaded. Save entity to disk and remove from RAM.
+                chunkIO.saveEntityToChunk(cx, cz, entity, localDimension)
+                iterator.remove()
+                continue
+            }
+
+            if (entity is ItemEntity) {
+                entity.age++
+                // Proste despawnowanie po 5 minutach
+                if (entity.age > 30 * 60 * 5) {
+                    iterator.remove()
+                    continue
+                }
+
+                // --- Animacja przyciągania (Magnes) ---
+                if (entity.isBeingPickedUp) {
+                    entity.pickupAnimationTicks++
+                    val maxTicks = 8 // ~0.25s przy 30 TPS
+
+                    // Celujemy w kamerę gracza
+                    val targetX = camX
+                    val targetY = viewY - 0.5 // Trochę poniżej oczu
+                    val targetZ = camZ
+
+                    val dx = targetX - entity.x
+                    val dy = targetY - entity.y
+                    val dz = targetZ - entity.z
+
+                    // Ruch w stronę gracza (Lerp 30%)
+                    entity.x += dx * 0.3
+                    entity.y += dy * 0.3
+                    entity.z += dz * 0.3
+
+                    // Jeśli dotarł lub czas minął -> dodaj do eq
+                    val distSq = dx * dx + dy * dy + dz * dz
+                    if (entity.pickupAnimationTicks >= maxTicks || distSq < 0.25) {
+                        val remaining = addItem(entity.itemStack.color, entity.itemStack.count)
+                        if (remaining == 0) {
+                            iterator.remove()
+                        } else {
+                            entity.itemStack.count = remaining
+                            entity.isBeingPickedUp = false
+                            entity.pickupAnimationTicks = 0
+                            entity.pickupDelay = 20 // Delay po nieudanej próbie
+                        }
+                    }
+                    continue // Pomijamy fizykę
+                }
+
+                // Obsługa timeoutu zbierania
+                if (entity.pickupDelay > 0) {
+                    entity.pickupDelay--
+                } else {
+                    // 1. Dystans od oczu gracza (viewY) - Zasięg podnoszenia w jednostkach świata
+                    val pickupRadius = 4.5
+                    val pickupRadiusSq = pickupRadius * pickupRadius
+                    val dx = entity.x - camX
+                    val dy = entity.y - viewY
+                    val dz = entity.z - camZ
+                    val distSq = dx * dx + dy * dy + dz * dz
+
+                    if (distSq <= pickupRadiusSq) {
+                        // 2. Sprawdzanie widoczności (Line of Sight) - czy nie ma ściany
+                        if (hasLineOfSight(camX, viewY, camZ, entity.x, entity.y+1, entity.z)) {
+                            // 3. Sprawdzenie, czy jest miejsce w ekwipunku
+                            if (canAddItem(entity.itemStack.color, entity.itemStack.count)) {
+                                // Rozpocznij animację przyciągania
+                                entity.isBeingPickedUp = true
+                                continue
+                            }
+                        }
+                    }
+                }
+
+                // Obracanie się przedmiotu
+                entity.yaw += 0.05
+
+                // --- Fizyka ---
+                if (!entity.onGround) {
+                    entity.velY -= gravity * 0.2 // Słabsza grawitacja dla przedmiotów
+                }
+
+                // Tarcie o podłoże
+                if (entity.onGround) {
+                    entity.velX *= 0.8
+                    entity.velZ *= 0.8
+                } else {
+                    // Tarcie w powietrzu
+                    entity.velX *= 0.98
+                    entity.velZ *= 0.98
+                }
+
+                // Zatrzymanie małych prędkości
+                if (abs(entity.velX) < 0.001) entity.velX = 0.0
+                if (abs(entity.velZ) < 0.001) entity.velZ = 0.0
+
+                // --- Kolizje i ruch ---
+                // Osobne osie, aby umożliwić ślizganie się po ścianach
+                val nextX = entity.x + entity.velX
+                val nextY = entity.y + entity.velY
+                val nextZ = entity.z + entity.velZ
+
+                // Oś Y
+                if (checkEntityCollision(entity.x, nextY, entity.z, entity)) {
+                    if (entity.velY < 0) { // Uderzenie w podłogę
+                        entity.onGround = true
+                    }
+                    entity.velY = 0.0 // Zatrzymanie
+                } else {
+                    entity.y = nextY
+                    entity.onGround = false
+                }
+
+                // Oś X
+                if (checkEntityCollision(nextX, entity.y, entity.z, entity)) {
+                    entity.velX = 0.0
+                } else {
+                    entity.x = nextX
+                }
+
+                // Oś Z
+                if (checkEntityCollision(entity.x, entity.y, nextZ, entity)) {
+                    entity.velZ = 0.0
+                } else {
+                    entity.z = nextZ
+                }
+            }
+        }
+    }
+
+    // Sprawdza czy między punktem A i B jest czysta linia widzenia (brak bloków stałych)
+    private fun hasLineOfSight(x1: Double, y1: Double, z1: Double, x2: Double, y2: Double, z2: Double): Boolean {
+        // Konwersja na koordynaty voxelowe (Gracz)
+        val pX = floor(x1 / cubeSize).toInt()
+        val pY = floor((y1 + 10.0) / cubeSize).toInt()
+        val pZ = floor(z1 / cubeSize).toInt()
+
+        // Konwersja na koordynaty voxelowe (Przedmiot)
+        val tX = floor(x2 / cubeSize).toInt()
+        val tY = floor((y2 + 10.0) / cubeSize).toInt()
+        val tZ = floor(z2 / cubeSize).toInt()
+
+        // Sprawdź z poziomu głowy
+        if (checkBlockLineOfSight(pX, pY, pZ, tX, tY, tZ)) return true
+
+        // Sprawdź z poziomu stóp/tułowia (blok niżej)
+        if (checkBlockLineOfSight(pX, pY - 1, pZ, tX, tY, tZ)) return true
+
+        return false
+    }
+
+    private fun checkBlockLineOfSight(x1: Int, y1: Int, z1: Int, x2: Int, y2: Int, z2: Int): Boolean {
+        // Obliczamy środki bloków w przestrzeni świata
+        val startX = (x1 + 0.5) * cubeSize
+        val startY = (y1 * cubeSize) - 10.0 + (cubeSize * 0.5)
+        val startZ = (z1 + 0.5) * cubeSize
+
+        val endX = (x2 + 0.5) * cubeSize
+        val endY = (y2 * cubeSize) - 10.0 + (cubeSize * 0.5)
+        val endZ = (z2 + 0.5) * cubeSize
+
+        val dx = endX - startX
+        val dy = endY - startY
+        val dz = endZ - startZ
+
+        val stepX = if (dx > 0) 1 else -1
+        val stepY = if (dy > 0) 1 else -1
+        val stepZ = if (dz > 0) 1 else -1
+
+        val tDeltaX = if (dx == 0.0) Double.MAX_VALUE else abs(cubeSize / dx)
+        val tDeltaY = if (dy == 0.0) Double.MAX_VALUE else abs(cubeSize / dy)
+        val tDeltaZ = if (dz == 0.0) Double.MAX_VALUE else abs(cubeSize / dz)
+
+        // Startujemy ze środka bloku, więc do granicy mamy 0.5 * cubeSize
+        var currTMaxX = if (dx == 0.0) Double.MAX_VALUE else 0.5 * tDeltaX
+        var currTMaxY = if (dy == 0.0) Double.MAX_VALUE else 0.5 * tDeltaY
+        var currTMaxZ = if (dz == 0.0) Double.MAX_VALUE else 0.5 * tDeltaZ
+
+        var cx = x1
+        var cy = y1
+        var cz = z1
+
+        // Limit kroków
+        val maxSteps = abs(x2 - x1) + abs(y2 - y1) + abs(z2 - z1) + 2
+
+        for (i in 0 until maxSteps) {
+            // Sprawdź blok w obecnym voxelu
+            val blockId = getRawBlock(cx, cy, cz)
+            // Jeśli trafiliśmy na blok stały (nie powietrze i nie płyn), to ściana blokuje widok
+            if (blockId != 0 && !fluidBlocks.contains(blockId)) {
+                // Ignorujemy blok startowy i końcowy
+                if (!((cx == x1 && cy == y1 && cz == z1) || (cx == x2 && cy == y2 && cz == z2))) {
+                    return false
+                }
+            }
+
+            if (cx == x2 && cy == y2 && cz == z2) return true
+
+            if (currTMaxX < currTMaxY) {
+                if (currTMaxX < currTMaxZ) {
+                    cx += stepX
+                    currTMaxX += tDeltaX
+                } else {
+                    cz += stepZ
+                    currTMaxZ += tDeltaZ
+                }
+            } else {
+                if (currTMaxY < currTMaxZ) {
+                    cy += stepY
+                    currTMaxY += tDeltaY
+                } else {
+                    cz += stepZ
+                    currTMaxZ += tDeltaZ
+                }
+            }
+        }
+        return true
+    }
+
+    private fun checkEntityCollision(x: Double, y: Double, z: Double, entity: Entity): Boolean {
+        // Pobieramy względne wymiary hitboxa i skalujemy je
+        val scaledMin = entity.hitboxMin.copy(x = entity.hitboxMin.x * entity.scale, y = entity.hitboxMin.y * entity.scale, z = entity.hitboxMin.z * entity.scale)
+        val scaledMax = entity.hitboxMax.copy(x = entity.hitboxMax.x * entity.scale, y = entity.hitboxMax.y * entity.scale, z = entity.hitboxMax.z * entity.scale)
+
+        // Obliczamy koordynaty bloków, które pokrywa hitbox
+        val minBx = floor((x + scaledMin.x) / cubeSize + 0.5).toInt()
+        val maxBx = floor((x + scaledMax.x) / cubeSize + 0.5).toInt()
+
+        val minY_world = y + scaledMin.y
+        val maxY_world = y + scaledMax.y
+
+        val minBy = floor((minY_world + 10.0) / cubeSize + 0.5).toInt()
+        val maxBy = floor((maxY_world + 10.0) / cubeSize + 0.5).toInt()
+
+        val minBz = floor((z + scaledMin.z) / cubeSize + 0.5).toInt()
+        val maxBz = floor((z + scaledMax.z) / cubeSize + 0.5).toInt()
+
+        for (bx in minBx..maxBx) {
+            for (by in minBy..maxBy) {
+                for (bz in minBz..maxBz) {
+                    val id = getRawBlock(bx, by, bz)
+                    if (id != 0 && !fluidBlocks.contains(id)) {
+                        return true // Kolizja z blokiem stałym
+                    }
+                }
+            }
+        }
+        return false
     }
 
     // --- System Symulacji Płynów ---
@@ -3016,6 +3424,7 @@ class KapeLuz : JPanel() {
                         if (!gameFrozen) {
                             cloudOffset += 1.0 / 30.0
                             simulateFluids(gameTicks)
+                            updateEntities()
                         }
 
                         val now = System.currentTimeMillis()
@@ -3545,6 +3954,8 @@ class KapeLuz : JPanel() {
 
         // --- MOD HOOK: 3D Rendering ---
         modLoader.notifyRender3D()
+
+        renderEntities()
     }
 
     private fun renderSky() {
@@ -4250,6 +4661,30 @@ class KapeLuz : JPanel() {
                 }
             }
         }
+
+        val entityColor = Color.WHITE
+        for (entity in entities) {
+            val (min, max) = entity.getHitboxAABB()
+
+            val c0 = Vector3d(min.x, min.y, min.z)
+            val c1 = Vector3d(max.x, min.y, min.z)
+            val c2 = Vector3d(max.x, max.y, min.z)
+            val c3 = Vector3d(min.x, max.y, min.z)
+            val c4 = Vector3d(min.x, min.y, max.z)
+            val c5 = Vector3d(max.x, min.y, max.z)
+            val c6 = Vector3d(max.x, max.y, max.z)
+            val c7 = Vector3d(min.x, max.y, max.z)
+
+            // Bottom
+            drawLine3D(c0, c1, entityColor); drawLine3D(c1, c5, entityColor)
+            drawLine3D(c5, c4, entityColor); drawLine3D(c4, c0, entityColor)
+            // Top
+            drawLine3D(c3, c2, entityColor); drawLine3D(c2, c6, entityColor)
+            drawLine3D(c6, c7, entityColor); drawLine3D(c7, c3, entityColor)
+            // Vertical
+            drawLine3D(c0, c3, entityColor); drawLine3D(c1, c2, entityColor)
+            drawLine3D(c4, c7, entityColor); drawLine3D(c5, c6, entityColor)
+        }
     }
 
     private fun drawSelectionBox(block: BlockPos, color: Color = Color.BLACK) {
@@ -4569,6 +5004,139 @@ class KapeLuz : JPanel() {
         }
     }
 
+    private fun renderEntities() {
+        for (entity in entities) {
+            // --- RENDER SHADOW ---
+            if (entity.shadowRadius > 0) {
+                val bx = floor(entity.x / cubeSize).toInt()
+                val by = floor((entity.y + 10.0) / cubeSize).toInt()
+                val bz = floor(entity.z / cubeSize).toInt()
+
+                // Find ground level below entity
+                var groundYLevel = -999.0
+                for (k in by downTo maxOf(0, by - 5)) {
+                    val blockId = getRawBlock(bx, k, bz)
+                    if (blockId != 0 && !fluidBlocks.contains(blockId)) {
+                        groundYLevel = k * cubeSize - 10.0 + cubeSize / 2.0
+                        break
+                    }
+                }
+
+                if (groundYLevel > -900) {
+                    val shadowY = groundYLevel + 0.05 // Slight offset to avoid z-fighting
+                    val r = entity.shadowRadius * cubeSize
+                    val shadowColor = Color(0, 0, 0, 128) // Semi-transparent black shadow
+
+                    // Round shadow (Triangle Fan)
+                    val segments = 12
+                    val center = Vector3d(entity.x, shadowY, entity.z)
+                    val angleStep = 2.0 * Math.PI / segments
+
+                    for (i in 0 until segments) {
+                        val a1 = i * angleStep
+                        val a2 = (i + 1) * angleStep
+                        val p1 = Vector3d(entity.x + cos(a1) * r, shadowY, entity.z + sin(a1) * r)
+                        val p2 = Vector3d(entity.x + cos(a2) * r, shadowY, entity.z + sin(a2) * r)
+                        renderTransparentTriangle(Triangle3d(center, p1, p2, shadowColor, 15))
+                    }
+                }
+            }
+
+            if (entity is ItemEntity) {
+                val baseColor = Color(getBlockDisplayColor(entity.itemStack.color), true)
+                // Darken the item block slightly (Goal 4)
+                val itemColor = Color((baseColor.red * 0.9).toInt(), (baseColor.green * 0.9).toInt(), (baseColor.blue * 0.9).toInt(), baseColor.alpha)
+                val scale = entity.scale
+                val d = (cubeSize / 2.0) * scale
+
+                val cosEYaw = cos(entity.yaw)
+                val sinEYaw = sin(entity.yaw)
+
+                // 8 wierzchołków sześcianu wycentrowanego w (0,0,0)
+                val baseVertices = arrayOf(
+                    Vector3d(-d, -d, -d), Vector3d(d, -d, -d),
+                    Vector3d(d, d, -d), Vector3d(-d, d, -d),
+                    Vector3d(-d, -d, d), Vector3d(d, -d, d),
+                    Vector3d(d, d, d), Vector3d(-d, d, d)
+                )
+
+                // Obrót i translacja wierzchołków do pozycji bytu
+                val worldVertices = Array(8) {
+                    val v = baseVertices[it]
+                    // Obrót wokół osi Y
+                    val rx = v.x * cosEYaw - v.z * sinEYaw
+                    val rz = v.z * cosEYaw + v.x * sinEYaw
+                    // Translacja do pozycji bytu
+                    Vector3d(rx + entity.x, v.y + entity.y+0.3, rz + entity.z)
+                }
+
+                // Tworzenie trójkątów z wierzchołków
+                val entityTriangles = mutableListOf<Triangle3d>()
+                
+                // Helper to apply shading per face (Goal 3)
+                fun addEntityFace(v1: Int, v2: Int, v3: Int, v4: Int, shade: Double) {
+                    val wx = floor(entity.x / cubeSize + 0.5).toInt()
+                    val wy = floor((entity.y + 10.0) / cubeSize + 0.5).toInt()
+                    val wz = floor(entity.z / cubeSize + 0.5).toInt()
+                    val light = getLight(wx, wy, wz)
+                    
+                    val r = (itemColor.red * shade).toInt().coerceIn(0, 255)
+                    val g = (itemColor.green * shade).toInt().coerceIn(0, 255)
+                    val b = (itemColor.blue * shade).toInt().coerceIn(0, 255)
+                    val shadedColor = Color(r, g, b, itemColor.alpha)
+
+                    entityTriangles.add(Triangle3d(worldVertices[v1], worldVertices[v2], worldVertices[v3], shadedColor, light))
+                    entityTriangles.add(Triangle3d(worldVertices[v1], worldVertices[v3], worldVertices[v4], shadedColor, light))
+                }
+
+                addEntityFace(0, 1, 2, 3, 0.8) // Przód (Z-)
+                addEntityFace(5, 4, 7, 6, 0.8) // Tył (Z+)
+                addEntityFace(4, 0, 3, 7, 0.6) // Lewo (X-)
+                addEntityFace(1, 5, 6, 2, 0.6) // Prawo (X+)
+                addEntityFace(3, 2, 6, 7, 1.0) // Góra (Y+)
+                addEntityFace(4, 5, 1, 0, 0.5) // Dół (Y-)
+
+                // Przepuszczenie trójkątów przez potok renderujący
+                for (tri in entityTriangles) {
+                    val t1 = transform(tri.p1); val t2 = transform(tri.p2); val t3 = transform(tri.p3)
+                    val line1 = Vector3d(t2.x - t1.x, t2.y - t1.y, t2.z - t1.z); val line2 = Vector3d(t3.x - t1.x, t3.y - t1.y, t3.z - t1.z)
+                    val normal = Vector3d(line1.y * line2.z - line1.z * line2.y, line1.z * line2.x - line1.x * line2.z, line1.x * line2.y - line1.y * line2.x)
+                    if (t1.x * normal.x + t1.y * normal.y + t1.z * normal.z > 0) {
+                        val clipped = clipTriangleAgainstPlane(Triangle3d(t1, t2, t3, tri.color, tri.lightLevel))
+                        for (c in clipped) {
+                            val packedLight = c.lightLevel; val skyLight = (packedLight shr 4) and 0xF; val blockLight = packedLight and 0xF
+                            val finalRGB = if (!debugFullbright) { lightProcessor.process(floor(entity.x / cubeSize + 0.5).toInt(), floor((entity.y + 10.0) / cubeSize + 0.5).toInt(), floor(entity.z / cubeSize + 0.5).toInt(), c.color, skyLight, blockLight, globalSunIntensity, minLightFactor) } else { c.color.rgb }
+                            val p1_2d = project(c.p1); val p2_2d = project(c.p2); val p3_2d = project(c.p3)
+                            fillTriangle(p1_2d, p2_2d, p3_2d, c.p1, c.p2, c.p3, Color(finalRGB))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Helper function to render a single transparent triangle (used for shadows)
+    private fun renderTransparentTriangle(tri: Triangle3d) {
+        val t1 = transform(tri.p1)
+        val t2 = transform(tri.p2)
+        val t3 = transform(tri.p3)
+
+        if (t1.z > nearPlaneZ && t2.z > nearPlaneZ && t3.z > nearPlaneZ) {
+            val p1_2d = project(t1)
+            val p2_2d = project(t2)
+            val p3_2d = project(t3)
+            fillTransparentTriangle(p1_2d, p2_2d, p3_2d, t1, t2, t3, tri.color)
+        } else {
+            val clipped = clipTriangleAgainstPlane(Triangle3d(t1, t2, t3, tri.color, tri.lightLevel))
+            for (c in clipped) {
+                val p1_2d = project(c.p1)
+                val p2_2d = project(c.p2)
+                val p3_2d = project(c.p3)
+                fillTransparentTriangle(p1_2d, p2_2d, p3_2d, c.p1, c.p2, c.p3, c.color)
+            }
+        }
+    }
+
     override fun paintComponent(g: Graphics) {
         super.paintComponent(g)
         val g2d = g as Graphics2D
@@ -4654,6 +5222,12 @@ class KapeLuz : JPanel() {
 
             if (keyCode == KeyEvent.VK_F9) changeDimension("overworld")
             if (keyCode == KeyEvent.VK_F10) changeDimension("the_nether")
+
+            if (keyCode == KeyEvent.VK_Q) {
+                if (gameState == GameState.IN_GAME) {
+                    dropSelectedItem()
+                }
+            }
 
             if (keyCode == KeyEvent.VK_Y) {
                 val currentChunkX = floor(camX / 32.0).toInt()

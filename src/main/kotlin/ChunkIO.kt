@@ -128,6 +128,12 @@ open class ChunkIO(worldName: String) {
         }
     }
 
+    fun saveEntityToChunk(cx: Int, cz: Int, entity: Entity, dimension: String) {
+        val chunk = loadChunk(cx, cz, dimension) ?: Chunk(cx, cz)
+        chunk.storedEntities.add(entity)
+        saveChunk(chunk, dimension)
+    }
+
     open fun loadChunk(cx: Int, cz: Int, dimension: String = "overworld"): Chunk? {
         val regionX = cx shr 5
         val regionZ = cz shr 5
@@ -237,6 +243,12 @@ open class ChunkIO(worldName: String) {
                     dos.writeByte(currentMetaCount)
                     dos.writeByte(currentMetaValue.toInt())
                 }
+
+                // 4. Entities
+                dos.writeInt(chunk.storedEntities.size)
+                for (entity in chunk.storedEntities) {
+                    writeEntity(dos, entity)
+                }
             }
             return baos.toByteArray()
         }
@@ -283,6 +295,15 @@ open class ChunkIO(worldName: String) {
                         }
                     }
                 }
+
+                // 4. Entities
+                if (dis.available() > 0) {
+                    val entityCount = dis.readInt()
+                    for (i in 0 until entityCount) {
+                        val entity = readEntity(dis)
+                        if (entity != null) chunk.storedEntities.add(entity)
+                    }
+                }
             }
             chunk.modified = false
             // Ustaw flagę hasBlocks jeśli chunk nie jest pusty
@@ -293,6 +314,58 @@ open class ChunkIO(worldName: String) {
                 }
             }
             return chunk
+        }
+
+        private fun writeEntity(dos: DataOutputStream, entity: Entity) {
+            if (entity is ItemEntity) {
+                dos.writeByte(1) // Type 1 = ItemEntity
+                dos.writeDouble(entity.x)
+                dos.writeDouble(entity.y)
+                dos.writeDouble(entity.z)
+                dos.writeDouble(entity.yaw)
+                dos.writeDouble(entity.pitch)
+                dos.writeDouble(entity.velX)
+                dos.writeDouble(entity.velY)
+                dos.writeDouble(entity.velZ)
+                // ItemStack
+                dos.writeInt(entity.itemStack.color)
+                dos.writeInt(entity.itemStack.count)
+                // Extra
+                dos.writeInt(entity.pickupDelay)
+                dos.writeLong(entity.age)
+            }
+            // Add other entity types here if needed
+        }
+
+        private fun readEntity(dis: DataInputStream): Entity? {
+            val type = dis.readByte()
+            if (type == 1.toByte()) {
+                val x = dis.readDouble()
+                val y = dis.readDouble()
+                val z = dis.readDouble()
+                val yaw = dis.readDouble()
+                val pitch = dis.readDouble()
+                val velX = dis.readDouble()
+                val velY = dis.readDouble()
+                val velZ = dis.readDouble()
+
+                val color = dis.readInt()
+                val count = dis.readInt()
+                val stack = ItemStack(color, count)
+
+                val pickupDelay = dis.readInt()
+                val age = dis.readLong()
+
+                val entity = ItemEntity(stack, x, y, z, pickupDelay)
+                entity.yaw = yaw
+                entity.pitch = pitch
+                entity.velX = velX
+                entity.velY = velY
+                entity.velZ = velZ
+                entity.age = age
+                return entity
+            }
+            return null
         }
     }
 

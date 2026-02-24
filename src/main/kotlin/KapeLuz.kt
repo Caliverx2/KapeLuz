@@ -1955,33 +1955,42 @@ class KapeLuz : JPanel() {
         refreshChunkData(cx, cz)
     }
 
-    private fun dropSelectedItem() {
+    private fun dropSelectedItem(countToDrop: Int = 1) {
         val stack = inventory[selectedSlot] ?: return
         if (stack.count <= 0) return
 
-        // Create a copy of the item to be dropped, but with count 1
-        val droppedItemStack = stack.copy(count = 1)
+        var remainingToDrop = minOf(stack.count, countToDrop)
+        val totalToConsume = remainingToDrop
 
-        // Calculate spawn position and velocity
-        // Spawn from the camera, not inside the player's head
-        val spawnX = camX + sin(yaw) * cos(pitch) * 0.8
-        val spawnY = viewY + sin(pitch) * 0.5
-        val spawnZ = camZ + cos(yaw) * cos(pitch) * 0.8
+        while (remainingToDrop > 0) {
+            val batchCount = minOf(remainingToDrop, 16)
 
-        val itemEntity = ItemEntity(droppedItemStack, spawnX, spawnY, spawnZ, pickupDelay = 40) // 40 ticków = 2 sekundy
+            // Create a copy of the item to be dropped
+            val droppedItemStack = stack.copy(count = batchCount)
 
-        // Give it velocity away from the player
-        val throwSpeed = 0.4
-        itemEntity.velX = sin(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
-        itemEntity.velY = sin(pitch) * throwSpeed + 0.15
-        itemEntity.velZ = cos(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
-        entities.add(itemEntity)
-        consumeCurrentItem()
+            // Calculate spawn position and velocity
+            // Spawn from the camera, not inside the player's head
+            val spawnX = camX + sin(yaw) * cos(pitch) * 0.8
+            val spawnY = viewY + sin(pitch) * 0.5
+            val spawnZ = camZ + cos(yaw) * cos(pitch) * 0.8
+
+            val itemEntity = ItemEntity(droppedItemStack, spawnX, spawnY, spawnZ, pickupDelay = 40) // 40 ticków = 2 sekundy
+
+            // Give it velocity away from the player
+            val throwSpeed = 0.4
+            itemEntity.velX = sin(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
+            itemEntity.velY = sin(pitch) * throwSpeed + 0.15
+            itemEntity.velZ = cos(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
+            entities.add(itemEntity)
+
+            remainingToDrop -= batchCount
+        }
+        consumeCurrentItem(totalToConsume)
     }
 
-    private fun consumeCurrentItem() {
+    private fun consumeCurrentItem(amount: Int = 1) {
         val stack = inventory[selectedSlot] ?: return
-        stack.count--
+        stack.count -= amount
         if (stack.count <= 0) inventory[selectedSlot] = null
     }
 
@@ -2712,6 +2721,57 @@ class KapeLuz : JPanel() {
                 if (entity.age > 30 * 60 * 5) {
                     iterator.remove()
                     continue
+                }
+
+                // --- System Łączenia Przedmiotów (Item Merging) ---
+                // Limit nasycenia: 16. Mniejsze przyciągają się do większych.
+                if (!entity.isBeingPickedUp && entity.itemStack.count < 16 && entity.age > 10) {
+                    var mergedAndRemoved = false
+                    for (other in entities) {
+                        if (other === entity) continue
+                        if (other !is ItemEntity) continue
+                        if (other.isBeingPickedUp) continue
+                        if (other.itemStack.color != entity.itemStack.color) continue // Tylko ten sam typ
+                        if (other.itemStack.count >= 16) continue // Cel jest pełny
+
+                        val dx = other.x - entity.x
+                        val dy = other.y - entity.y
+                        val dz = other.z - entity.z
+                        val distSq = dx * dx + dy * dy + dz * dz
+
+                        // Promień przyciągania (1.5 bloku)
+                        if (distSq < 1.5 * 1.5) {
+                            // Logika: Mniejszy idzie do większego. Jeśli równe, decyduje wiek (młodszy do starszego).
+                            val shouldMoveToOther = entity.itemStack.count < other.itemStack.count ||
+                                    (entity.itemStack.count == other.itemStack.count && entity.age < other.age)
+
+                            if (shouldMoveToOther) {
+                                entity.velX += dx * 0.05
+                                entity.velY += dy * 0.05
+                                entity.velZ += dz * 0.05
+
+                                // Jeśli są bardzo blisko, następuje połączenie
+                                if (distSq < 0.5 * 0.5) {
+                                    val spaceInOther = 16 - other.itemStack.count
+                                    val transfer = minOf(entity.itemStack.count, spaceInOther)
+
+                                    if (transfer > 0) {
+                                        other.itemStack.count += transfer
+                                        entity.itemStack.count -= transfer
+                                        other.pickupDelay = maxOf(other.pickupDelay, entity.pickupDelay)
+                                        other.age = 0 // Odświeżamy wiek "zwycięzcy"
+
+                                        if (entity.itemStack.count <= 0) {
+                                            iterator.remove()
+                                            mergedAndRemoved = true
+                                            break // Przerywamy pętlę po other, bo entity zniknął
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (mergedAndRemoved) continue // Przechodzimy do następnego entity w głównej pętli
                 }
 
                 // --- Animacja przyciągania (Magnes) ---
@@ -5225,7 +5285,11 @@ class KapeLuz : JPanel() {
 
             if (keyCode == KeyEvent.VK_Q) {
                 if (gameState == GameState.IN_GAME) {
-                    dropSelectedItem()
+                    if (inputManager.isKeyDown(KeyEvent.VK_CONTROL)) {
+                        dropSelectedItem(64)
+                    } else {
+                        dropSelectedItem(1)
+                    }
                 }
             }
 

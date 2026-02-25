@@ -1963,7 +1963,7 @@ class KapeLuz : JPanel() {
         val totalToConsume = remainingToDrop
 
         while (remainingToDrop > 0) {
-            val batchCount = minOf(remainingToDrop, 16)
+            val batchCount = minOf(remainingToDrop, 64)
 
             // Create a copy of the item to be dropped
             val droppedItemStack = stack.copy(count = batchCount)
@@ -5112,6 +5112,9 @@ class KapeLuz : JPanel() {
                 val cosEYaw = cos(entity.yaw)
                 val sinEYaw = sin(entity.yaw)
 
+                // Animacja góra/dół (bobbing)
+                val bobOffset = sin(entity.age * 0.1) * 0.1
+
                 // 8 wierzchołków sześcianu wycentrowanego w (0,0,0)
                 val baseVertices = arrayOf(
                     Vector3d(-d, -d, -d), Vector3d(d, -d, -d),
@@ -5120,41 +5123,65 @@ class KapeLuz : JPanel() {
                     Vector3d(d, d, d), Vector3d(-d, d, d)
                 )
 
-                // Obrót i translacja wierzchołków do pozycji bytu
-                val worldVertices = Array(8) {
-                    val v = baseVertices[it]
-                    // Obrót wokół osi Y
-                    val rx = v.x * cosEYaw - v.z * sinEYaw
-                    val rz = v.z * cosEYaw + v.x * sinEYaw
-                    // Translacja do pozycji bytu
-                    Vector3d(rx + entity.x, v.y + entity.y+0.3, rz + entity.z)
+                // Określenie ile kostek renderować na podstawie ilości w stacku
+                val count = entity.itemStack.count
+                val amountToRender = when {
+                    count >= 49 -> 5
+                    count >= 33 -> 4
+                    count >= 17 -> 3
+                    count >= 2 -> 2
+                    else -> 1
                 }
 
-                // Tworzenie trójkątów z wierzchołków
                 val entityTriangles = mutableListOf<Triangle3d>()
-                
-                // Helper to apply shading per face (Goal 3)
-                fun addEntityFace(v1: Int, v2: Int, v3: Int, v4: Int, shade: Double) {
-                    val wx = floor(entity.x / cubeSize + 0.5).toInt()
-                    val wy = floor((entity.y + 10.0) / cubeSize + 0.5).toInt()
-                    val wz = floor(entity.z / cubeSize + 0.5).toInt()
-                    val light = getLight(wx, wy, wz)
-                    
-                    val r = (itemColor.red * shade).toInt().coerceIn(0, 255)
-                    val g = (itemColor.green * shade).toInt().coerceIn(0, 255)
-                    val b = (itemColor.blue * shade).toInt().coerceIn(0, 255)
-                    val shadedColor = Color(r, g, b, itemColor.alpha)
 
-                    entityTriangles.add(Triangle3d(worldVertices[v1], worldVertices[v2], worldVertices[v3], shadedColor, light))
-                    entityTriangles.add(Triangle3d(worldVertices[v1], worldVertices[v3], worldVertices[v4], shadedColor, light))
+                // Używamy identityHashCode jako ziarna, aby układ klastra był stały dla danego bytu (brak migotania), ale losowy dla różnych bytów
+                val random = Random(System.identityHashCode(entity).toLong())
+
+                for (i in 0 until amountToRender) {
+                    // Przesunięcia dla efektu klastra (Minecraft style: losowe rozrzucenie w zakresie +/- 0.15)
+                    val ox = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 else 0.0
+                    val oy = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 else 0.0
+                    val oz = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 else 0.0
+
+                    // Obrót i translacja wierzchołków do pozycji bytu
+                    val worldVertices = Array(8) {
+                        val v = baseVertices[it]
+                        // Aplikujemy offset klastra przed obrotem
+                        val vx = v.x + ox
+                        val vy = v.y + oy
+                        val vz = v.z + oz
+
+                        // Obrót wokół osi Y
+                        val rx = vx * cosEYaw - vz * sinEYaw
+                        val rz = vz * cosEYaw + vx * sinEYaw
+                        // Translacja do pozycji bytu
+                        Vector3d(rx + entity.x, vy + entity.y + 0.3 + bobOffset, rz + entity.z)
+                    }
+
+                    // Helper to apply shading per face (Goal 3)
+                    fun addEntityFace(v1: Int, v2: Int, v3: Int, v4: Int, shade: Double) {
+                        val wx = floor(entity.x / cubeSize + 0.5).toInt()
+                        val wy = floor((entity.y + 10.0) / cubeSize + 0.5).toInt()
+                        val wz = floor(entity.z / cubeSize + 0.5).toInt()
+                        val light = getLight(wx, wy, wz)
+
+                        val r = (itemColor.red * shade).toInt().coerceIn(0, 255)
+                        val g = (itemColor.green * shade).toInt().coerceIn(0, 255)
+                        val b = (itemColor.blue * shade).toInt().coerceIn(0, 255)
+                        val shadedColor = Color(r, g, b, itemColor.alpha)
+
+                        entityTriangles.add(Triangle3d(worldVertices[v1], worldVertices[v2], worldVertices[v3], shadedColor, light))
+                        entityTriangles.add(Triangle3d(worldVertices[v1], worldVertices[v3], worldVertices[v4], shadedColor, light))
+                    }
+
+                    addEntityFace(0, 1, 2, 3, 0.8) // Przód (Z-)
+                    addEntityFace(5, 4, 7, 6, 0.8) // Tył (Z+)
+                    addEntityFace(4, 0, 3, 7, 0.6) // Lewo (X-)
+                    addEntityFace(1, 5, 6, 2, 0.6) // Prawo (X+)
+                    addEntityFace(3, 2, 6, 7, 1.0) // Góra (Y+)
+                    addEntityFace(4, 5, 1, 0, 0.5) // Dół (Y-)
                 }
-
-                addEntityFace(0, 1, 2, 3, 0.8) // Przód (Z-)
-                addEntityFace(5, 4, 7, 6, 0.8) // Tył (Z+)
-                addEntityFace(4, 0, 3, 7, 0.6) // Lewo (X-)
-                addEntityFace(1, 5, 6, 2, 0.6) // Prawo (X+)
-                addEntityFace(3, 2, 6, 7, 1.0) // Góra (Y+)
-                addEntityFace(4, 5, 1, 0, 0.5) // Dół (Y-)
 
                 // Przepuszczenie trójkątów przez potok renderujący
                 for (tri in entityTriangles) {

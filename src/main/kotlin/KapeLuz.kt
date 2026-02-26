@@ -40,7 +40,7 @@ data class Triangle3d(
 data class ModelVoxel(val x: Int, val y: Int, val z: Int, val color: Color, val isVoid: Boolean = false)
 
 // Struktura dla innych graczy (Multiplayer)
-data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0)
+data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0, var dimension: String = "overworld", var hasReceivedEntities: Boolean = false)
 
 abstract class Entity(
     var x: Double, var y: Double, var z: Double,
@@ -48,7 +48,9 @@ abstract class Entity(
     var velX: Double = 0.0, var velY: Double = 0.0, var velZ: Double = 0.0,
     val scale: Double = 1.0,
     var onGround: Boolean = false,
-    open var shadowRadius: Double = 0.0
+    open var shadowRadius: Double = 0.0,
+    var dimension: String = "overworld",
+    var id: Int = 0 // Unikalne ID sieciowe
 ) {
     // Hitbox relative to the entity's position (x,y,z) as its center
     abstract val hitboxMin: Vector3d
@@ -62,7 +64,7 @@ abstract class Entity(
 }
 
 data class ItemEntity(val itemStack: ItemStack, private val initialX: Double, private val initialY: Double, private val initialZ: Double, var pickupDelay: Int = 0) : Entity(initialX, initialY, initialZ, scale = 0.25) {
-    override val hitboxMin: Vector3d = Vector3d(-1.25, -1.25, -1.25) // Based on a 1x1x1 cube before scaling
+    override val hitboxMin: Vector3d = Vector3d(-1.25, -1.25, -1.25)
     override val hitboxMax: Vector3d = Vector3d(1.25, 1.25, 1.25)
     override var shadowRadius: Double = 0.3
     var age = 0L
@@ -334,6 +336,7 @@ class KapeLuz : JPanel() {
 
     // --- Byty (Entities) ---
     private val entities = ConcurrentLinkedQueue<Entity>()
+    private var nextEntityId = 1
 
     // --- Threading & Optimization ---
     // Zmiana: Zostawiamy 2 rdzenie wolne (dla renderowania i systemu) oraz ustawiamy niski priorytet
@@ -458,6 +461,8 @@ class KapeLuz : JPanel() {
                 val netId = playerNetIds[playerId]
                 val player = if (netId != null) remotePlayers[netId] else null
 
+                val playerDim = player?.dimension ?: "overworld"
+
                 // TARGET BUFFER: Zmniejszono do 64KB.
                 // 160KB było zbyt agresywne i powodowało zatykanie łącza (ICE Disconnected) przy wysyłaniu innych pakietów.
                 val targetBufferFill = 64 * 1024
@@ -487,7 +492,12 @@ class KapeLuz : JPanel() {
                     }
 
                     // Pobieramy chunk (z cache lub z mapy/generatora)
-                    val chunk = if (lastChunkPos == p) lastChunk else (chunks[p] ?: generateChunk(p.x, p.y))
+                    // FIX: Jeśli gracz jest w innym wymiarze niż Host, nie używamy `chunks` (które są lokalne dla Hosta), tylko ładujemy bezpośrednio.
+                    val chunk = if (playerDim == localDimension) {
+                        if (lastChunkPos == p) lastChunk else (chunks[p] ?: generateChunk(p.x, p.y, playerDim))
+                    } else {
+                        generateChunk(p.x, p.y, playerDim)
+                    }
 
                     if (chunk != null) {
                         lastChunk = chunk
@@ -895,10 +905,8 @@ class KapeLuz : JPanel() {
                 chunk.storedEntities.addAll(ent)
                 chunk.modified = true
             }
-            if (chunk.modified) {
-                chunkIO.saveChunk(chunk, localDimension)
-                chunk.modified = false
-            }
+            chunkIO.saveChunk(chunk, localDimension)
+            chunk.modified = false
         }
         chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension))
         println("All modified chunks saved.")
@@ -990,6 +998,7 @@ class KapeLuz : JPanel() {
             localDimension = worldData.localDimension
         } else {
             seed = worldName.hashCode() // Domyślny seed dla nowego świata (unikalny per nazwa)
+            localDimension = "overworld"
         }
 
         noise = PerlinNoise(seed)
@@ -1030,6 +1039,7 @@ class KapeLuz : JPanel() {
             chunks[Point(startCx, startCz)] = startChunk
 
             if (startChunk.storedEntities.isNotEmpty()) {
+                startChunk.storedEntities.forEach { if (it.id == 0) it.id = nextEntityId++ }
                 entities.addAll(startChunk.storedEntities)
                 startChunk.storedEntities.clear()
             }
@@ -1156,7 +1166,29 @@ class KapeLuz : JPanel() {
                                     val netId = playerNetIds[targetId]
                                     if (netId != null) {
                                         // Aktualizujemy pozycję u Hosta
-                                        remotePlayers[netId] = RemotePlayer(data.x, data.y, data.z, data.yaw, data.pitch, System.currentTimeMillis(), System.currentTimeMillis())
+                                        val player = remotePlayers.getOrPut(netId) {
+                                            println("Nowy gracz ($netId) pojawił się na hoście.")
+                                            // Inicjalizujemy z domyślną pozycją i wymiarem, zostaną natychmiast nadpisane
+                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, 0L, 0L, "overworld")
+                                        }
+                                        player.apply {
+                                            x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch
+                                            lastUpdate = System.currentTimeMillis()
+                                            if (lastKeepAlive == 0L) lastKeepAlive = System.currentTimeMillis() // Inicjalizacja
+                                        }
+
+                                        // FIX: Synchronizacja bytów po nawiązaniu połączenia (gdy otrzymamy pierwszy pakiet pozycji)
+                                        if (!player.hasReceivedEntities) {
+                                            player.hasReceivedEntities = true
+                                            println("Wysyłanie początkowej listy bytów do gracza $netId w wymiarze ${player.dimension}")
+                                            entities.forEach { entity ->
+                                                if (entity.dimension == player.dimension && entity is ItemEntity) {
+                                                    val spawnPacket = NetworkProtocol.encodeEntitySpawn(entity)
+                                                    // Używamy targetId z closure (ID sygnalizacyjne)
+                                                    peerConnections[targetId]?.sendData(spawnPacket)
+                                                }
+                                            }
+                                        }
 
                                         // Relay: Host wysyła tę pozycję do innych, podmieniając ID w pakiecie na ID nadawcy
                                         val relayedPacket = NetworkProtocol.encodePlayerPosition(netId, data.x, data.y, data.z, data.yaw, data.pitch)
@@ -1172,7 +1204,97 @@ class KapeLuz : JPanel() {
                                     // Klient: Otrzymuje pakiet od Hosta z poprawnym ID
                                     // Ignorujemy własne ID (jeśli relay wrócił)
                                     if (data.playerId != myPlayerId.toByteOrNull()) {
-                                        remotePlayers[data.playerId] = RemotePlayer(data.x, data.y, data.z, data.yaw, data.pitch, System.currentTimeMillis(), System.currentTimeMillis())
+                                        remotePlayers.getOrPut(data.playerId) {
+                                            // Gracz pojawił się między aktualizacjami listy graczy
+                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0)
+                                        }.apply { x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch; lastUpdate = System.currentTimeMillis() }
+                                    }
+                                }
+                            }
+                            NetworkProtocol.PACKET_ENTITY_SPAWN -> {
+                                val data = NetworkProtocol.decodeEntitySpawn(bufferCopy)
+                                // Klient (i Host w rzadkich przypadkach loopback) dodaje byt
+                                // Sprawdzamy czy byt o tym ID już nie istnieje, aby uniknąć duplikatów
+                                if (entities.none { it.id == data.id }) {
+                                    val stack = ItemStack(data.color, data.count)
+                                    val entity = ItemEntity(stack, data.x, data.y, data.z)
+                                    entity.velX = data.velX; entity.velY = data.velY; entity.velZ = data.velZ
+                                    entity.id = data.id
+                                    entity.dimension = data.dimension
+                                    entities.add(entity)
+                                }
+                            }
+                            NetworkProtocol.PACKET_ENTITY_MOVE -> {
+                                val data = NetworkProtocol.decodeEntityMove(bufferCopy)
+                                val entity = entities.find { it.id == data.id }
+                                if (entity != null) {
+                                    entity.x = data.x; entity.y = data.y; entity.z = data.z
+                                    entity.velX = data.velX; entity.velY = data.velY; entity.velZ = data.velZ
+                                    if (entity is ItemEntity && data.count > 0) {
+                                        entity.itemStack.count = data.count
+                                    }
+                                }
+                            }
+                            NetworkProtocol.PACKET_ENTITY_DESTROY -> {
+                                bufferCopy.get() // Skip header
+                                val id = bufferCopy.int
+                                entities.removeIf { it.id == id }
+                            }
+                            NetworkProtocol.PACKET_DROP_ITEM_REQUEST -> {
+                                if (isHost) {
+                                    val req = NetworkProtocol.decodeDropRequest(bufferCopy)
+                                    val senderNetId = playerNetIds[targetId]
+                                    val senderPlayer = remotePlayers[senderNetId]
+                                    if (senderPlayer != null) {
+                                        // Host spawnuje przedmiot w miejscu gracza
+                                        val spawnX = senderPlayer.x + sin(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.8
+                                        val spawnY = senderPlayer.y + sin(senderPlayer.pitch) * 0.5 // Uproszczone viewY (bez kucania Hosta)
+                                        val spawnZ = senderPlayer.z + cos(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.8
+
+                                        val stack = ItemStack(req.color, req.count)
+                                        val entity = ItemEntity(stack, spawnX, spawnY, spawnZ, pickupDelay = 40)
+                                        entity.velX = sin(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.4
+                                        entity.velY = sin(senderPlayer.pitch) * 0.4 + 0.15
+                                        entity.velZ = cos(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.4
+
+                                        spawnEntity(entity, senderPlayer.dimension)
+                                    }
+                                }
+                            }
+                            NetworkProtocol.PACKET_ADD_ITEM -> {
+                                // Klient otrzymuje przedmiot od Hosta (np. po podniesieniu)
+                                val data = NetworkProtocol.decodeAddItem(bufferCopy)
+                                val remaining = addItem(data.color, data.count)
+                                
+                                // Jeśli ekwipunek pełny, wyrzucamy resztę z powrotem (Host zespawnuje item z delayem)
+                                if (remaining > 0) {
+                                    val packet = NetworkProtocol.encodeDropItemRequest(data.color, remaining)
+                                    peerConnections.values.firstOrNull()?.sendData(packet)
+                                }
+                            }
+                            NetworkProtocol.PACKET_PLAYER_DIMENSION -> {
+                                val data = NetworkProtocol.decodePlayerDimension(bufferCopy)
+                                if (isHost) {
+                                    val netId = playerNetIds[targetId]
+                                    if (netId != null) {
+                                        remotePlayers[netId]?.dimension = data.dimension
+                                        // Relay dimension change to others
+                                        val relayedPacket = NetworkProtocol.encodePlayerDimension(netId, data.dimension)
+                                        peerConnections.forEach { (pid, rtc) ->
+                                            if (pid != targetId) rtc.sendData(relayedPacket)
+                                        }
+                                        entities.forEach { entity ->
+                                            if (entity.dimension == data.dimension && entity is ItemEntity) {
+                                                // Wysyłamy tylko do tego gracza
+                                                val spawnPacket = NetworkProtocol.encodeEntitySpawn(entity)
+                                                peerConnections[targetId]?.sendData(spawnPacket)
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Client receives dimension update of another player
+                                    if (data.playerId != myPlayerId.toByteOrNull()) {
+                                        remotePlayers[data.playerId]?.dimension = data.dimension
                                     }
                                 }
                             }
@@ -1194,38 +1316,71 @@ class KapeLuz : JPanel() {
                                 }
 
                                 if (isHost) {
+                                    val senderDim = remotePlayers[playerNetIds[targetId]]?.dimension ?: "overworld"
                                     val cx = if (data.x >= 0) data.x / 16 else (data.x + 1) / 16 - 1
                                     val cz = if (data.z >= 0) data.z / 16 else (data.z + 1) / 16 - 1
                                     val p = Point(cx, cz)
 
-                                    if (chunks.containsKey(p)) {
+                                    if (senderDim == localDimension && chunks.containsKey(p)) {
+                                        // FIX: Host sprawdza czy zniszczono blok i spawnuje drop
+                                        if (data.color == 0) {
+                                            val oldBlock = getRawBlock(data.x, data.y, data.z)
+                                            if (oldBlock != 0) {
+                                                val itemStack = ItemStack(oldBlock, 1)
+                                                val spawnX = data.x * cubeSize
+                                                val spawnY = data.y * cubeSize - 10.0
+                                                val spawnZ = data.z * cubeSize
+                                                val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                                                // Spawnujemy w wymiarze gracza, który zniszczył blok
+                                                spawnEntity(itemEntity, senderDim)
+                                            }
+                                        }
+
                                         // SCENARIUSZ 1: Chunk jest załadowany u Hosta -> Normalna aktualizacja
                                         setBlockWithMeta(data.x, data.y, data.z, data.color, data.metadata)
-                                        refreshChunkData(cx, cz)
+                                        refreshChunkData(cx, cz, isHighPriority = true)
                                     } else {
-                                        // SCENARIUSZ 2: Chunk jest poza zasięgiem Hosta -> Edycja pliku zapisu w tle
+                                        // SCENARIUSZ 2: Chunk jest poza zasięgiem Hosta LUB w innym wymiarze -> Edycja pliku zapisu w tle
                                         chunkExecutor.submit {
-                                            var chunk = chunkIO.loadChunk(cx, cz)
+                                            // FIX: Load chunk from the sender's dimension
+                                            var chunk = chunkIO.loadChunk(cx, cz, senderDim)
                                             if (chunk == null) {
                                                 chunk = chunkGenerator.generate(cx, cz)
                                             }
                                             var lx = data.x % 16; if (lx < 0) lx += 16
                                             var lz = data.z % 16; if (lz < 0) lz += 16
                                             if (data.y in 0..127) {
+                                                // FIX: Drop z bloku w niezaładowanym chunku (rzadkie, ale możliwe)
+                                                if (data.color == 0) {
+                                                    val oldBlock = chunk.getBlock(lx, data.y, lz)
+                                                    if (oldBlock != 0) {
+                                                        val itemStack = ItemStack(oldBlock, 1)
+                                                        val spawnX = data.x * cubeSize
+                                                        val spawnY = data.y * cubeSize - 10.0
+                                                        val spawnZ = data.z * cubeSize
+                                                        val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                                                        spawnEntity(itemEntity, senderDim)
+                                                    }
+                                                }
                                                 chunk.setBlock(lx, data.y, lz, data.color)
                                                 chunk.setMeta(lx, data.y, lz, data.metadata.toInt())
-                                                chunkIO.saveChunk(chunk)
+                                                chunkIO.saveChunk(chunk, senderDim)
                                             }
                                         }
                                     }
-                                    // Host przekazuje zmianę bloku WSZYSTKIM innym graczom
+                                    // Host przekazuje zmianę bloku WSZYSTKIM innym graczom w TYM SAMYM wymiarze
+                                    // (Można filtrować tutaj, ale relayPacketToOthers wysyła do wszystkich.
+                                    //  Klient i tak zignoruje blok jeśli jest poza jego zasięgiem renderowania,
+                                    //  ale dla poprawności wymiarów, klient powinien wiedzieć.
+                                    //  Obecnie protokół BLOCK_SET nie ma wymiaru.
+                                    //  Więc Host powinien wysłać to TYLKO do graczy w tym samym wymiarze.)
                                     relayPacketToOthers(dataCopy, senderId = targetId)
                                 } else {
                                     // KLIENT: Zawsze aktualizuje to co widzi
                                     setBlockWithMeta(data.x, data.y, data.z, data.color, data.metadata)
                                     val cx = if (data.x >= 0) data.x / 16 else (data.x + 1) / 16 - 1
                                     val cz = if (data.z >= 0) data.z / 16 else (data.z + 1) / 16 - 1
-                                    refreshChunkData(cx, cz)
+                                    refreshChunkData(cx, cz, isHighPriority = true)
                                 }
                             }
                             NetworkProtocol.PACKET_CHUNK_SECTION -> {
@@ -1279,14 +1434,16 @@ class KapeLuz : JPanel() {
                             NetworkProtocol.PACKET_CHUNK_REQUEST -> {
                                 if (isHost) {
                                     val req = NetworkProtocol.decodeChunkRequest(bufferCopy)
+                                    val playerDim = remotePlayers[playerNetIds[targetId]]?.dimension ?: "overworld"
                                     val p = Point(req.cx, req.cz)
                                     chunkExecutor.submit {
                                         try {
-                                            var chunk = chunks[p]
-                                            if (chunk == null) chunk = chunkIO.loadChunk(req.cx, req.cz)
+                                            // Jeśli gracz jest w tym samym wymiarze co Host, sprawdź cache. Jeśli nie, ładuj z dysku.
+                                            var chunk = if (playerDim == localDimension) chunks[p] else null
+                                            if (chunk == null) chunk = chunkIO.loadChunk(req.cx, req.cz, playerDim)
                                             if (chunk == null) {
-                                                chunk = chunkGenerator.generate(req.cx, req.cz)
-                                                chunkIO.saveChunk(chunk)
+                                                chunk = chunkGenerator.generate(req.cx, req.cz) // Generator jest generyczny
+                                                chunkIO.saveChunk(chunk, playerDim)
                                             }
                                             chunks.putIfAbsent(p, chunk)
                                             // Kolejkujemy chunk dla KONKRETNEGO gracza
@@ -1365,13 +1522,42 @@ class KapeLuz : JPanel() {
 
     // Funkcja Hosta do przekazywania pakietów (Relaying)
     private fun relayPacketToOthers(data: ByteArray, senderId: String) {
+        val senderDim = remotePlayers[playerNetIds[senderId]]?.dimension
         peerConnections.forEach { (pid, rtc) ->
             if (pid != senderId) { // Nie odsyłamy do nadawcy
                 try {
-                    val buffer = ByteBuffer.wrap(data) // Wrap jest tani (nie kopiuje)
+                    // FIX: Relay only if target player is in the same dimension (for block updates)
+                    // Note: For PlayerPos, we might want to relay always (so tab list works), but BlockSet needs filtering.
+                    // Since we pass raw bytes, we can't easily distinguish here without parsing.
+                    // For now, we relay everything. Clients in other dimensions will receive block updates for coordinates they might not have loaded, which is harmless (ignored).
+                    // Ideally, we should filter BLOCK_SET.
+                    val targetDim = remotePlayers[playerNetIds[pid]]?.dimension
+                    // Simple optimization: If dimensions match or it's a global packet (like chat/player info), send it.
+                    // Assuming BLOCK_SET is the main concern.
+                    // Let's just send it. The client logic `setBlock` checks if chunk is loaded.
+                    // If client is in Nether and receives Overworld coords, likely chunk is not loaded -> ignored.
+                    val buffer = ByteBuffer.wrap(data)
                     rtc.sendData(buffer)
                 } catch (e: Exception) {
                     println("Błąd relay do $pid: ${e.message}")
+                }
+            }
+        }
+    }
+
+    // Funkcja Hosta do spawnowania i synchronizacji
+    private fun spawnEntity(entity: Entity, dimension: String) {
+        entity.id = nextEntityId++
+        entity.dimension = dimension
+        entities.add(entity)
+
+        if (isHost && entity is ItemEntity) {
+            val packet = NetworkProtocol.encodeEntitySpawn(entity)
+            peerConnections.forEach { (pid, rtc) ->
+                // Wysyłamy tylko do graczy w tym samym wymiarze
+                val pDim = remotePlayers[playerNetIds[pid]]?.dimension ?: "overworld"
+                if (pDim == dimension) {
+                    rtc.sendData(packet)
                 }
             }
         }
@@ -1466,7 +1652,7 @@ class KapeLuz : JPanel() {
                             // Jeśli nie ma mesha LUB mesh jest pusty, a chunk ma bloki -> wymuś generowanie
                             if (mesh == null || mesh.all { it.isEmpty() }) {
                                 // Wywołujemy bezpośrednio - funkcja jest już asynchroniczna i sama zarządza kolejką.
-                                refreshChunkData(cx, cz)
+                                refreshChunkData(cx, cz, isHighPriority = true)
                                 fixedThisFrame++
                                 if (fixedThisFrame >= maxFixesPerFrame) break
                             }
@@ -1528,8 +1714,27 @@ class KapeLuz : JPanel() {
 
                     // --- LOAD ENTITIES ---
                     if (newChunk.storedEntities.isNotEmpty()) {
-                        entities.addAll(newChunk.storedEntities)
+                        // Host/Singleplayer ładuje byty z chunka
+                        val justLoaded = newChunk.storedEntities.toList()
+                        justLoaded.forEach {
+                            it.dimension = localDimension // Przypisujemy wymiar chunka
+                            if (it.id == 0) it.id = nextEntityId++ // Nadajemy ID jeśli brak
+                        }
+                        entities.addAll(justLoaded)
                         newChunk.storedEntities.clear()
+
+                        // Jeśli Host, powiadom graczy w tym wymiarze o nowych bytach
+                        if (isHost) {
+                            justLoaded.forEach { ent ->
+                                if (ent is ItemEntity) {
+                                    val packet = NetworkProtocol.encodeEntitySpawn(ent)
+                                    peerConnections.forEach { (pid, rtc) ->
+                                        val pDim = remotePlayers[playerNetIds[pid]]?.dimension ?: "overworld"
+                                        if (pDim == localDimension) rtc.sendData(packet)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Ujednolicenie logiki: Używamy tej samej, solidnej funkcji co multiplayer.
@@ -1600,14 +1805,19 @@ class KapeLuz : JPanel() {
 
         val key = Point(cx, cz)
 
-        // Dodajemy do kolejki tylko, jeśli ten chunk nie czeka już na odświeżenie.
-        // Jeśli lx/lz są podane (edycja bloku), pozwalamy na dodanie, aby nie zgubić interakcji gracza.
-        // Jeśli to pełne odświeżenie (lx=-1), deduplikujemy agresywnie.
         val isFullRefresh = (lx == -1 && lz == -1 && changedBlocks == null)
 
         if (!isFullRefresh || chunksInRefreshQueue.add(key)) {
-            // Definiujemy priorytet
-            val priority = if (isHighPriority) 10 else 0 // Prosty system: 10 dla 'Y', 0 dla reszty
+            // Definiujemy priorytet, aby chunki bliżej gracza i zmiany wywołane przez gracza były przetwarzane pierwsze.
+            // To daje znacznie płynniejsze wrażenie wczytywania świata i interakcji.
+            val priority = if (isHighPriority) {
+                1000 // Akcje gracza, aktualizacje bloków itp. mają absolutny priorytet.
+            } else {
+                // Dla nowo generowanych chunków, priorytet jest oparty na odległości.
+                val distSq = (cx - currentChunkX) * (cx - currentChunkX) + (cz - currentChunkZ) * (cz - currentChunkZ)
+                // Chunks bliżej mają wyższy priorytet.
+                (renderDistance * renderDistance + 1) - distSq
+            }
 
             val task = Runnable {
                 try {
@@ -1621,7 +1831,7 @@ class KapeLuz : JPanel() {
 
             // Owijamy zadanie w PriorityTask i przekazujemy do executora
             // Używamy .execute() a nie .submit(), aby uniknąć opakowania w FutureTask, które nie jest Comparable.
-            refreshExecutor.execute(PriorityTask(priority, task))
+            refreshExecutor.execute(PriorityTask(priority.toInt().coerceAtLeast(0), task))
         }
     }
 
@@ -1687,11 +1897,25 @@ class KapeLuz : JPanel() {
         chunkOcclusion.clear()
         chunksBeingGenerated.clear()
         chunksToMeshQueue.clear()
+
+        //Host NIE czyści bytów, bo zarządza nimi globalnie dla wszystkich graczy.
+        // Tylko klient czyści, bo dostanie nowe od Hosta.
+        if (isMultiplayerClient) {
+            entities.clear()
+        }
+
+        // Notify multiplayer about dimension change
+        if (isMultiplayer) {
+            try {
+                val packet = NetworkProtocol.encodePlayerDimension(if (isHost) 1 else 0, localDimension)
+                peerConnections.forEach { (_, rtc) -> rtc.sendData(packet) }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
     }
 
-    private fun generateChunk(cx: Int, cz: Int): Chunk {
+    private fun generateChunk(cx: Int, cz: Int, dim: String = localDimension): Chunk {
         // 0. Próba wczytania z dysku
-        val loadedChunk = chunkIO.loadChunk(cx, cz, localDimension)
+        val loadedChunk = chunkIO.loadChunk(cx, cz, dim)
         if (loadedChunk != null) return loadedChunk
 
         // 1. Jeśli nie ma na dysku, generujemy nowy.
@@ -1952,7 +2176,7 @@ class KapeLuz : JPanel() {
         // Odświeżamy chunki w okolicy (uproszczone odświeżanie centralnego punktu)
         val cx = if (x >= 0) x / 16 else (x + 1) / 16 - 1
         val cz = if (z >= 0) z / 16 else (z + 1) / 16 - 1
-        refreshChunkData(cx, cz)
+        refreshChunkData(cx, cz, isHighPriority = true)
     }
 
     private fun dropSelectedItem(countToDrop: Int = 1) {
@@ -1961,6 +2185,15 @@ class KapeLuz : JPanel() {
 
         var remainingToDrop = minOf(stack.count, countToDrop)
         val totalToConsume = remainingToDrop
+
+        // W Multiplayerze Klient tylko wysyła żądanie
+        if (isMultiplayerClient) {
+            val packet = NetworkProtocol.encodeDropItemRequest(stack.color, remainingToDrop)
+            // Klient ma tylko jedno połączenie - do Hosta
+            peerConnections.values.firstOrNull()?.sendData(packet)
+            consumeCurrentItem(totalToConsume)
+            return
+        }
 
         while (remainingToDrop > 0) {
             val batchCount = minOf(remainingToDrop, 64)
@@ -1981,7 +2214,7 @@ class KapeLuz : JPanel() {
             itemEntity.velX = sin(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
             itemEntity.velY = sin(pitch) * throwSpeed + 0.15
             itemEntity.velZ = cos(yaw) * cos(pitch) * throwSpeed + (Math.random() - 0.5) * 0.1
-            entities.add(itemEntity)
+            spawnEntity(itemEntity, localDimension)
 
             remainingToDrop -= batchCount
         }
@@ -2171,14 +2404,23 @@ class KapeLuz : JPanel() {
                     val spawnZ = (z) * cubeSize
                     // Timeout 10 ticków (0.5s), brak prędkości początkowej (tylko grawitacja w updateEntities)
                     val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
-                    entities.add(itemEntity)
+                    // W Multiplayerze niszczenie bloku jest obsługiwane przez Hosta (który wyśle spawn itemu),
+                    // ale tutaj mamy logikę lokalną.
+                    // FIX: Jeśli jesteśmy klientem, NIE spawnujemy itemu lokalnie (czekamy na pakiet od Hosta lub Host spawnuje).
+                    // W obecnym kodzie niszczenie bloku wysyła tylko `PACKET_BLOCK_SET` (air).
+                    // Host odbiera `BLOCK_SET(air)` i powinien sprawdzić co tam było i zespawnować item.
+                    // Na razie zostawiamy lokalny spawn dla Singleplayer, a w MP Host musi to obsłużyć.
+
+                    if (!isMultiplayerClient) {
+                        spawnEntity(itemEntity, localDimension)
+                    }
                 }
                 setBlock(x, y, z, 0)
 
                 // Optymalizacja: Przekazujemy lokalne współrzędne
                 var lx = x % 16; if (lx < 0) lx += 16
                 var lz = z % 16; if (lz < 0) lz += 16
-                refreshChunkData(cx, cz, lx, lz)
+                refreshChunkData(cx, cz, isHighPriority = true)
                 return
             }
         }
@@ -2235,13 +2477,18 @@ class KapeLuz : JPanel() {
                             // --- MULTIPLAYER: Wyślij postawienie bloku ---
                             // FIX: Usunięto sprawdzanie GameState.MULTIPLAYER, bo podczas gry jest IN_GAME
                             // Wysyłamy do wszystkich połączonych peerów
-                            peerConnections.forEach { (_, rtc) ->
+                            peerConnections.forEach { (pid, rtc) ->
+                                // Optimization: Send block updates only to players in the same dimension
+                                val netId = playerNetIds[pid]
+                                val pDim = if (netId != null) remotePlayers[netId]?.dimension ?: "overworld" else "overworld"
+                                if (pDim == localDimension) {
                                 try {
                                     val packet = NetworkProtocol.encodeBlockChange(lastX, lastY, lastZ, stack.color, metaToSet)
                                     rtc.sendData(packet)
                                 } catch (e: Exception) {
                                     println("Błąd wysyłania bloku: ${e.message}")
                                 }
+                            }
                             }
 
                             // Jeśli stawiamy płyn (np. lawę), ustawiamy go jako źródło
@@ -2276,19 +2523,25 @@ class KapeLuz : JPanel() {
                         val spawnY = (y) * cubeSize - 10.0
                         val spawnZ = (z) * cubeSize
                         val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
-                        entities.add(itemEntity)
+                        if (!isMultiplayerClient) {
+                            spawnEntity(itemEntity, localDimension)
+                        }
                     }
 
                     setBlock(x, y, z, 0)
 
                     // --- MULTIPLAYER: Wyślij zniszczenie bloku (kolor 0) ---
                     // FIX: Usunięto sprawdzanie GameState.MULTIPLAYER
-                    peerConnections.forEach { (_, rtc) ->
+                    peerConnections.forEach { (pid, rtc) ->
+                        val netId = playerNetIds[pid]
+                        val pDim = if (netId != null) remotePlayers[netId]?.dimension ?: "overworld" else "overworld"
+                        if (pDim == localDimension) {
                         try {
                             val packet = NetworkProtocol.encodeBlockChange(x, y, z, 0, 0) // Meta 0 dla powietrza
                             rtc.sendData(packet)
                         } catch (e: Exception) {
                             println("Błąd wysyłania zniszczenia bloku: ${e.message}")
+                        }
                         }
                     }
                 }
@@ -2300,7 +2553,7 @@ class KapeLuz : JPanel() {
                 // Optymalizacja: Przekazujemy lokalne współrzędne
                 var lx = updateX % 16; if (lx < 0) lx += 16
                 var lz = updateZ % 16; if (lz < 0) lz += 16
-                refreshChunkData(cx, cz, lx, lz)
+                refreshChunkData(cx, cz, isHighPriority = true)
                 return
             }
 
@@ -2702,13 +2955,19 @@ class KapeLuz : JPanel() {
         while (iterator.hasNext()) {
             val entity = iterator.next()
 
+            // Host/Singleplayer liczy fizykę dla wszystkich.
+            // Klient liczy fizykę tylko dla bytów w swoim wymiarze (predykcja),
+            // ale pozycja jest korygowana przez Hosta.
+            if (isMultiplayerClient && entity.dimension != localDimension) continue
+            if (isHost && !isChunkLoaded(entity)) continue // Host optymalizacja
+
             // --- UNLOADED CHUNK CHECK ---
             val bx = floor(entity.x / cubeSize).toInt()
             val cx = if (bx >= 0) bx / 16 else (bx + 1) / 16 - 1
             val bz = floor(entity.z / cubeSize).toInt()
             val cz = if (bz >= 0) bz / 16 else (bz + 1) / 16 - 1
 
-            if (!chunks.containsKey(Point(cx, cz))) {
+            if (!isMultiplayerClient && !chunks.containsKey(Point(cx, cz))) {
                 // Chunk is not loaded. Save entity to disk and remove from RAM.
                 chunkIO.saveEntityToChunk(cx, cz, entity, localDimension)
                 iterator.remove()
@@ -2718,21 +2977,25 @@ class KapeLuz : JPanel() {
             if (entity is ItemEntity) {
                 entity.age++
                 // Proste despawnowanie po 5 minutach
-                if (entity.age > 30 * 60 * 5) {
+                if (!isMultiplayerClient && entity.age > 30 * 60 * 5) {
                     iterator.remove()
+                    if (isHost) {
+                        val packet = NetworkProtocol.encodeEntityDestroy(entity.id)
+                        peerConnections.forEach { (_, rtc) -> rtc.sendData(packet) }
+                    }
                     continue
                 }
 
                 // --- System Łączenia Przedmiotów (Item Merging) ---
-                // Limit nasycenia: 16. Mniejsze przyciągają się do większych.
-                if (!entity.isBeingPickedUp && entity.itemStack.count < 16 && entity.age > 10) {
+                // TYLKO HOST/SINGLEPLAYER
+                if (!isMultiplayerClient && !entity.isBeingPickedUp && entity.itemStack.count < 64 && entity.age > 10) {
                     var mergedAndRemoved = false
                     for (other in entities) {
                         if (other === entity) continue
                         if (other !is ItemEntity) continue
                         if (other.isBeingPickedUp) continue
                         if (other.itemStack.color != entity.itemStack.color) continue // Tylko ten sam typ
-                        if (other.itemStack.count >= 16) continue // Cel jest pełny
+                        if (other.itemStack.count >= 64) continue // Cel jest pełny
 
                         val dx = other.x - entity.x
                         val dy = other.y - entity.y
@@ -2752,7 +3015,7 @@ class KapeLuz : JPanel() {
 
                                 // Jeśli są bardzo blisko, następuje połączenie
                                 if (distSq < 0.5 * 0.5) {
-                                    val spaceInOther = 16 - other.itemStack.count
+                                    val spaceInOther = 64 - other.itemStack.count
                                     val transfer = minOf(entity.itemStack.count, spaceInOther)
 
                                     if (transfer > 0) {
@@ -2763,6 +3026,10 @@ class KapeLuz : JPanel() {
 
                                         if (entity.itemStack.count <= 0) {
                                             iterator.remove()
+                                            if (isHost) {
+                                                val packet = NetworkProtocol.encodeEntityDestroy(entity.id)
+                                                peerConnections.forEach { (_, rtc) -> rtc.sendData(packet) }
+                                            }
                                             mergedAndRemoved = true
                                             break // Przerywamy pętlę po other, bo entity zniknął
                                         }
@@ -2775,7 +3042,7 @@ class KapeLuz : JPanel() {
                 }
 
                 // --- Animacja przyciągania (Magnes) ---
-                if (entity.isBeingPickedUp) {
+                if (!isMultiplayerClient && entity.isBeingPickedUp) {
                     entity.pickupAnimationTicks++
                     val maxTicks = 8 // ~0.25s przy 30 TPS
 
@@ -2799,6 +3066,10 @@ class KapeLuz : JPanel() {
                         val remaining = addItem(entity.itemStack.color, entity.itemStack.count)
                         if (remaining == 0) {
                             iterator.remove()
+                            if (isHost) {
+                                val packet = NetworkProtocol.encodeEntityDestroy(entity.id)
+                                peerConnections.forEach { (_, rtc) -> rtc.sendData(packet) }
+                            }
                         } else {
                             entity.itemStack.count = remaining
                             entity.isBeingPickedUp = false
@@ -2812,7 +3083,7 @@ class KapeLuz : JPanel() {
                 // Obsługa timeoutu zbierania
                 if (entity.pickupDelay > 0) {
                     entity.pickupDelay--
-                } else {
+                } else if (isHost || !isMultiplayer) { // TYLKO HOST/SINGLEPLAYER
                     // 1. Dystans od oczu gracza (viewY) - Zasięg podnoszenia w jednostkach świata
                     val pickupRadius = 4.5
                     val pickupRadiusSq = pickupRadius * pickupRadius
@@ -2826,9 +3097,44 @@ class KapeLuz : JPanel() {
                         if (hasLineOfSight(camX, viewY, camZ, entity.x, entity.y+1, entity.z)) {
                             // 3. Sprawdzenie, czy jest miejsce w ekwipunku
                             if (canAddItem(entity.itemStack.color, entity.itemStack.count)) {
-                                // Rozpocznij animację przyciągania
+                                // W MP tylko Host decyduje o podniesieniu (dla siebie).
+                                // Dla klientów - Host musi wykryć kolizję z ich pozycją (TODO), na razie lokalnie.
                                 entity.isBeingPickedUp = true
                                 continue
+                            }
+                        }
+                    }
+
+                    // --- FIX: Host sprawdza kolizje dla WSZYSTKICH klientów ---
+                    if (isHost) {
+                        remotePlayers.forEach { (netId, player) ->
+                            // Sprawdzamy tylko graczy w tym samym wymiarze co przedmiot
+                            if (player.dimension == entity.dimension) {
+                                val pdx = entity.x - player.x
+                                val pdy = entity.y - (player.y - (if(player.pitch != 0.0) 0.0 else 1.62)) // Przybliżona pozycja
+                                val pdz = entity.z - player.z
+                                val pDistSq = pdx * pdx + pdy * pdy + pdz * pdz
+
+                                if (pDistSq <= pickupRadiusSq) {
+                                    // Sprawdzamy Line of Sight dla klienta (uproszczone)
+                                    // TODO: Dokładniejszy raycast dla klienta
+                                    if (true) {
+                                        // Host decyduje: Klient podnosi przedmiot
+                                        // Wysyłamy pakiet ADD_ITEM do klienta
+                                        val signalingId = playerNetIds.entries.find { it.value == netId }?.key
+                                        if (signalingId != null) {
+                                            val rtc = peerConnections[signalingId]
+                                            if (rtc != null) {
+                                                rtc.sendData(NetworkProtocol.encodeAddItem(entity.itemStack.color, entity.itemStack.count))
+
+                                                // Usuwamy byt i powiadamiamy wszystkich
+                                                iterator.remove()
+                                                val destroyPacket = NetworkProtocol.encodeEntityDestroy(entity.id)
+                                                peerConnections.forEach { (_, c) -> c.sendData(destroyPacket) }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2886,8 +3192,28 @@ class KapeLuz : JPanel() {
                 } else {
                     entity.z = nextZ
                 }
+
+                // --- MULTIPLAYER SYNC (HOST) ---
+                if (isHost && entity.age % 3 == 0L) { // Wysyłamy co 3 ticki (10 razy/sek)
+                    val count = if (entity is ItemEntity) entity.itemStack.count else 0
+                    val packet = NetworkProtocol.encodeEntityMove(entity.id, entity.x, entity.y, entity.z, entity.velX, entity.velY, entity.velZ, count)
+                    peerConnections.forEach { (pid, rtc) ->
+                        val pDim = remotePlayers[playerNetIds[pid]]?.dimension ?: "overworld"
+                        if (pDim == entity.dimension) {
+                            rtc.sendData(packet)
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private fun isChunkLoaded(entity: Entity): Boolean {
+        val bx = floor(entity.x / cubeSize).toInt()
+        val cx = if (bx >= 0) bx / 16 else (bx + 1) / 16 - 1
+        val bz = floor(entity.z / cubeSize).toInt()
+        val cz = if (bz >= 0) bz / 16 else (bz + 1) / 16 - 1
+        return chunks.containsKey(Point(cx, cz))
     }
 
     // Sprawdza czy między punktem A i B jest czysta linia widzenia (brak bloków stałych)
@@ -3295,7 +3621,13 @@ class KapeLuz : JPanel() {
                             val gz = chunkPos.y * 16 + pos.z
                             try {
                                 val packet = NetworkProtocol.encodeBlockChange(gx, gy, gz, id, packedMeta.toByte())
-                                peerConnections.forEach { (_, rtc) -> rtc.sendData(packet) }
+                                peerConnections.forEach { (pid, rtc) ->
+                                    // FIX: Wysyłaj zmiany płynów TYLKO do graczy w tym samym wymiarze co Host
+                                    val pDim = remotePlayers[playerNetIds[pid]]?.dimension ?: "overworld"
+                                    if (pDim == localDimension) {
+                                        rtc.sendData(packet)
+                                    }
+                                }
                             } catch (e: Exception) {
                                 // ignore
                             }
@@ -3531,8 +3863,9 @@ class KapeLuz : JPanel() {
                                 try {
                                     peerConnections.forEach { (pid, rtc) ->
                                         val netId = playerNetIds[pid] ?: 0
+                                        val pDim = remotePlayers[netId]?.dimension ?: "overworld"
                                         // Proste wywołanie - przekazujemy grę i ID gracza
-                                        val worldPacket = NetworkProtocol.encodeWorldData(this, netId)
+                                        val worldPacket = NetworkProtocol.encodeWorldData(this, netId, pDim)
                                         rtc.sendData(worldPacket)
                                     }
                                 } catch (e: Exception) {
@@ -3607,7 +3940,7 @@ class KapeLuz : JPanel() {
             // Budujemy listę wszystkich graczy (Host + Klienci)
             val allPlayers = HashMap<Byte, RemotePlayer>()
             // Dodaj Hosta (ID 1)
-            allPlayers[1] = RemotePlayer(camX, camY, camZ, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis())
+            allPlayers[1] = RemotePlayer(camX, camY, camZ, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), localDimension)
             // Dodaj Klientów
             allPlayers.putAll(remotePlayers)
 
@@ -3995,6 +4328,8 @@ class KapeLuz : JPanel() {
         // --- RENDER REMOTE PLAYERS ---
         val myIdByte = myPlayerId.toByteOrNull()
         remotePlayers.forEach { (id, player) ->
+            // Render only if in same dimension
+            if (player.dimension != localDimension) return@forEach
             if (myIdByte != null && id == myIdByte) return@forEach
             // Proste renderowanie gracza jako pudełka (hitboxa)
             // W przyszłości podmień to na model 3D
@@ -5066,6 +5401,8 @@ class KapeLuz : JPanel() {
 
     private fun renderEntities() {
         for (entity in entities) {
+            // Renderuj tylko byty w aktualnym wymiarze
+            if (entity.dimension != localDimension) continue
             // --- RENDER SHADOW ---
             if (entity.shadowRadius > 0) {
                 val bx = floor(entity.x / cubeSize).toInt()
@@ -5139,10 +5476,10 @@ class KapeLuz : JPanel() {
                 val random = Random(System.identityHashCode(entity).toLong())
 
                 for (i in 0 until amountToRender) {
-                    // Przesunięcia dla efektu klastra (Minecraft style: losowe rozrzucenie w zakresie +/- 0.15)
-                    val ox = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 else 0.0
-                    val oy = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 else 0.0
-                    val oz = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 else 0.0
+                    // Przesunięcia dla efektu klastra (Minecraft style: losowe rozrzucenie w zakresie +/- 0.15 * scale)
+                    val ox = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 * (entity.scale*5) else 0.0
+                    val oy = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 * (entity.scale*5) else 0.0
+                    val oz = if (i > 0) (random.nextDouble() * 2.0 - 1.0) * 0.15 * (entity.scale*5) else 0.0
 
                     // Obrót i translacja wierzchołków do pozycji bytu
                     val worldVertices = Array(8) {

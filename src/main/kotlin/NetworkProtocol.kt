@@ -19,6 +19,12 @@ object NetworkProtocol {
     const val PACKET_KEEP_ALIVE: Byte = 0x07
     const val PACKET_DISCONNECT: Byte = 0x08
     const val PACKET_CHUNK_SECTION: Byte = 0x09
+    const val PACKET_PLAYER_DIMENSION: Byte = 0x0A
+    const val PACKET_ENTITY_SPAWN: Byte = 0x0B
+    const val PACKET_ENTITY_MOVE: Byte = 0x0C
+    const val PACKET_ENTITY_DESTROY: Byte = 0x0D
+    const val PACKET_DROP_ITEM_REQUEST: Byte = 0x0E
+    const val PACKET_ADD_ITEM: Byte = 0x0F
 
     // --- HELPERY (Dla wygody) ---
     fun ByteBuffer.putBool(value: Boolean) = this.put(if (value) 1.toByte() else 0.toByte())
@@ -28,8 +34,9 @@ object NetworkProtocol {
     /**
      * HOST
      */
-    fun encodeWorldData(game: KapeLuz, targetPlayerId: Byte): ByteBuffer {
-        val estimatedSize = 64 + (game.oreColors.size * 4)
+    fun encodeWorldData(game: KapeLuz, targetPlayerId: Byte, playerDimension: String): ByteBuffer {
+        val dimBytes = playerDimension.toByteArray(Charsets.UTF_8)
+        val estimatedSize = 64 + (game.oreColors.size * 4) + 4 + dimBytes.size
         val buffer = ByteBuffer.allocate(estimatedSize)
         buffer.put(PACKET_WORLD_DATA)
 
@@ -39,6 +46,11 @@ object NetworkProtocol {
         buffer.putInt(game.dayCounter)
         buffer.put(targetPlayerId)
         buffer.putBool(game.gameFrozen)
+
+        // Dimension
+        buffer.putInt(dimBytes.size)
+        buffer.put(dimBytes)
+
         buffer.putInt(game.oreColors.size) // Zapisujemy liczbę elementów
         for (color in game.oreColors) {
             buffer.putInt(color)           // Zapisujemy każdy kolor jako Int
@@ -69,6 +81,22 @@ object NetworkProtocol {
 
         game.gameFrozen = if (buffer.hasRemaining()) buffer.getBool() else false
 
+        // Dimension
+        if (buffer.hasRemaining()) {
+            val dimLen = buffer.int
+            val dimBytes = ByteArray(dimLen)
+            buffer.get(dimBytes)
+            val serverDim = String(dimBytes, Charsets.UTF_8)
+
+            if (game.localDimension != serverDim) {
+                if (game.localDimension.isEmpty()) {
+                    game.localDimension = serverDim
+                } else {
+                    game.changeDimension(serverDim)
+                }
+            }
+        }
+
         // Deserializacja oreColors:
         if (buffer.hasRemaining()) {
             val colorCount = buffer.int
@@ -78,7 +106,6 @@ object NetworkProtocol {
             }
 
             // Logika aktualizacji: Czyścimy i dodajemy nowe, jeśli zbiór się zmienił
-            // (Własna implementacja porównania zbiorów byłaby tu wskazana)
             if (game.oreColors.size != newColors.size || !game.oreColors.containsAll(newColors)) {
                 game.oreColors.clear()
                 game.oreColors.addAll(newColors)
@@ -90,7 +117,6 @@ object NetworkProtocol {
     // --- ENKODERY (Wysyłanie) ---
     /**
      * Pakuje pozycję gracza do 16 bajtów (1 Header + 1 ID + 12 XYZ + 2 Rot).
-     * Oryginalnie: ~50 bajtów (z ID String i Double).
      */
     fun encodePlayerPosition(playerId: Byte, x: Double, y: Double, z: Double, yaw: Double, pitch: Double): ByteBuffer {
         val buffer = ByteBuffer.allocate(16)
@@ -103,17 +129,28 @@ object NetworkProtocol {
         buffer.putFloat(z.toFloat())
 
         // Kompresja kątów do 1 bajta (0-255)
-        // Yaw: normalizacja do 0..2PI -> 0..255
         val yawNorm = (yaw % (2 * PI))
         val yawByte = ((if (yawNorm < 0) yawNorm + 2 * PI else yawNorm) / (2 * PI) * 255).toInt().toByte()
-
-        // Pitch: zakres -PI/2..PI/2 -> 0..255
         val pitchByte = (((pitch + (PI / 2)) / PI) * 255).toInt().coerceIn(0, 255).toByte()
 
         buffer.put(yawByte)
         buffer.put(pitchByte)
 
-        buffer.flip() // Gotowy do wysłania
+        buffer.flip()
+        return buffer
+    }
+
+    /**
+     * Pakuje zmianę wymiaru gracza.
+     */
+    fun encodePlayerDimension(playerId: Byte, dimension: String): ByteBuffer {
+        val bytes = dimension.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocate(1 + 1 + 4 + bytes.size) // Header + ID + Length + String
+        buffer.put(PACKET_PLAYER_DIMENSION)
+        buffer.put(playerId)
+        buffer.putInt(bytes.size)
+        buffer.put(bytes)
+        buffer.flip()
         return buffer
     }
 
@@ -135,12 +172,8 @@ object NetworkProtocol {
 
     /**
      * Pakuje sekcję chunka (16x16x16) używając RLE.
-     * Dzieli chunk na 8 części w pionie (dla wysokości 128).
      */
     fun encodeChunkSection(cx: Int, cz: Int, sectionY: Int, chunkBlocks: IntArray, chunkMeta: ByteArray): ByteBuffer {
-        // Sekcja 16x16x16 = 4096 bloków.
-        // Max rozmiar bez kompresji: 4096 * 5 (blok) + 4096 * 2 (meta) ~ 28KB.
-        // Alokujemy 64KB dla bezpieczeństwa.
         val buffer = ByteBuffer.allocateDirect(65536)
         buffer.put(PACKET_CHUNK_SECTION)
         buffer.putInt(cx)
@@ -154,7 +187,7 @@ object NetworkProtocol {
         // 1. Kompresja Bloków (Int)
         var i = startIdx
         while (i < endIdx) {
-            if (buffer.position() > 60000) break // Safety check
+            if (buffer.position() > 60000) break
             val currentBlock = chunkBlocks[i]
             var count = 1
             while (i + count < endIdx && chunkBlocks[i + count] == currentBlock && count < 255) {
@@ -168,7 +201,7 @@ object NetworkProtocol {
         // 2. Kompresja Metadanych (Byte)
         i = startIdx
         while (i < endIdx) {
-            if (buffer.position() > 65000) break // Safety check
+            if (buffer.position() > 65000) break
             val currentMeta = chunkMeta[i]
             var count = 1
             while (i + count < endIdx && chunkMeta[i + count] == currentMeta && count < 255) {
@@ -183,9 +216,6 @@ object NetworkProtocol {
         return buffer
     }
 
-    /**
-     * Klient prosi o chunk: [Header][CX][CZ]
-     */
     fun encodeChunkRequest(cx: Int, cz: Int): ByteBuffer {
         val buffer = ByteBuffer.allocate(9)
         buffer.put(PACKET_CHUNK_REQUEST)
@@ -196,11 +226,17 @@ object NetworkProtocol {
     }
 
     /**
-     * Pakuje listę graczy: [Header][Count][ID, X, Y, Z, Yaw, Pitch]...
+     * Pakuje listę graczy: [Header][Count][ID, X, Y, Z, Yaw, Pitch, DimensionString]...
      */
     fun encodePlayerList(players: Map<Byte, RemotePlayer>): ByteBuffer {
-        // 1 (Header) + 1 (Count) + N * 15 (Player Data)
-        val buffer = ByteBuffer.allocate(2 + players.size * 15)
+        // Obliczamy rozmiar bufora dynamicznie
+        var size = 2 // Header + Count
+        players.forEach { (_, p) ->
+            size += 15 // ID + Pos + Rot
+            size += 4 + p.dimension.toByteArray(Charsets.UTF_8).size // Length + String bytes
+        }
+
+        val buffer = ByteBuffer.allocate(size)
         buffer.put(PACKET_PLAYER_LIST)
         buffer.put(players.size.toByte())
 
@@ -209,16 +245,129 @@ object NetworkProtocol {
             buffer.putFloat(p.x.toFloat())
             buffer.putFloat(p.y.toFloat())
             buffer.putFloat(p.z.toFloat())
-            
+
             val yawNorm = (p.yaw % (2 * PI))
             val yawByte = ((if (yawNorm < 0) yawNorm + 2 * PI else yawNorm) / (2 * PI) * 255).toInt().toByte()
             val pitchByte = (((p.pitch + (PI / 2)) / PI) * 255).toInt().coerceIn(0, 255).toByte()
-            
+
             buffer.put(yawByte)
             buffer.put(pitchByte)
+
+            val dimBytes = p.dimension.toByteArray(Charsets.UTF_8)
+            buffer.putInt(dimBytes.size)
+            buffer.put(dimBytes)
         }
         buffer.flip()
         return buffer
+    }
+
+    /**
+     * Pakuje pojawienie się bytu (ItemEntity).
+     */
+    fun encodeEntitySpawn(entity: ItemEntity): ByteBuffer {
+        val dimBytes = entity.dimension.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocate(65 + dimBytes.size)
+        buffer.put(PACKET_ENTITY_SPAWN)
+        buffer.putInt(entity.id)
+        buffer.putDouble(entity.x)
+        buffer.putDouble(entity.y)
+        buffer.putDouble(entity.z)
+        buffer.putDouble(entity.velX)
+        buffer.putDouble(entity.velY)
+        buffer.putDouble(entity.velZ)
+        buffer.putInt(entity.itemStack.color)
+        buffer.putInt(entity.itemStack.count)
+        buffer.putInt(dimBytes.size)
+        buffer.put(dimBytes)
+        buffer.flip()
+        return buffer
+    }
+
+    /**
+     * Pakuje ruch bytu.
+     */
+    fun encodeEntityMove(id: Int, x: Double, y: Double, z: Double, velX: Double, velY: Double, velZ: Double, count: Int): ByteBuffer {
+        val buffer = ByteBuffer.allocate(57) // 1 + 4 + 8*6 + 4
+        buffer.put(PACKET_ENTITY_MOVE)
+        buffer.putInt(id)
+        buffer.putDouble(x)
+        buffer.putDouble(y)
+        buffer.putDouble(z)
+        buffer.putDouble(velX)
+        buffer.putDouble(velY)
+        buffer.putDouble(velZ)
+        buffer.putInt(count)
+        buffer.flip()
+        return buffer
+    }
+
+    fun encodeEntityDestroy(id: Int): ByteBuffer {
+        val buffer = ByteBuffer.allocate(5)
+        buffer.put(PACKET_ENTITY_DESTROY)
+        buffer.putInt(id)
+        buffer.flip()
+        return buffer
+    }
+
+    fun encodeDropItemRequest(color: Int, count: Int): ByteBuffer {
+        val buffer = ByteBuffer.allocate(9)
+        buffer.put(PACKET_DROP_ITEM_REQUEST)
+        buffer.putInt(color)
+        buffer.putInt(count)
+        buffer.flip()
+        return buffer
+    }
+
+    fun encodeAddItem(color: Int, count: Int): ByteBuffer {
+        val buffer = ByteBuffer.allocate(9)
+        buffer.put(PACKET_ADD_ITEM)
+        buffer.putInt(color)
+        buffer.putInt(count)
+        buffer.flip()
+        return buffer
+    }
+
+    // --- DEKODERY ---
+
+    data class DecodedEntitySpawn(val id: Int, val x: Double, val y: Double, val z: Double, val velX: Double, val velY: Double, val velZ: Double, val color: Int, val count: Int, val dimension: String)
+    data class DecodedEntityMove(val id: Int, val x: Double, val y: Double, val z: Double, val velX: Double, val velY: Double, val velZ: Double, val count: Int)
+    data class DecodedDropRequest(val color: Int, val count: Int)
+    data class DecodedAddItem(val color: Int, val count: Int)
+
+    fun decodeEntitySpawn(buffer: ByteBuffer): DecodedEntitySpawn {
+        buffer.get() // Header
+        val id = buffer.int
+        val x = buffer.double; val y = buffer.double; val z = buffer.double
+        val vx = buffer.double; val vy = buffer.double; val vz = buffer.double
+        val color = buffer.int
+        val count = buffer.int
+        val dimLen = buffer.int
+        val dimBytes = ByteArray(dimLen)
+        buffer.get(dimBytes)
+        return DecodedEntitySpawn(id, x, y, z, vx, vy, vz, color, count, String(dimBytes, Charsets.UTF_8))
+    }
+
+    fun decodeEntityMove(buffer: ByteBuffer): DecodedEntityMove {
+        buffer.get() // Header
+        val id = buffer.int
+        val x = buffer.double; val y = buffer.double; val z = buffer.double
+        val vx = buffer.double; val vy = buffer.double; val vz = buffer.double
+        val count = if (buffer.hasRemaining()) buffer.int else 0
+        return DecodedEntityMove(id, x, y, z, vx, vy, vz, count)
+    }
+
+    fun decodeDropRequest(buffer: ByteBuffer): DecodedDropRequest {
+        buffer.get()
+        val color = buffer.int
+        val count = buffer.int
+        return DecodedDropRequest(color, count)
+    }
+
+    fun decodeAddItem(buffer: ByteBuffer): DecodedAddItem {
+        buffer.get()
+        val color = buffer.int
+        val count = buffer.int
+        return DecodedAddItem(color, count)
     }
 
     fun encodeSimpleSignal(type: Byte): ByteBuffer {
@@ -234,6 +383,7 @@ object NetworkProtocol {
     // --- DEKODERY (Odbieranie) ---
 
     data class DecodedPosition(val playerId: Byte, val x: Double, val y: Double, val z: Double, val yaw: Double, val pitch: Double)
+    data class DecodedDimension(val playerId: Byte, val dimension: String)
     data class DecodedBlock(val x: Int, val y: Int, val z: Int, val color: Int, val metadata: Byte)
     data class DecodedChunk(val cx: Int, val cz: Int, val blocks: IntArray, val metadata: ByteArray)
     data class DecodedChunkSection(val cx: Int, val cz: Int, val sectionY: Int, val blocks: IntArray, val metadata: ByteArray)
@@ -241,18 +391,17 @@ object NetworkProtocol {
 
     fun decodePacketType(buffer: ByteBuffer): Byte {
         if (buffer.remaining() == 0) return 0
-        return buffer.get(0) // Podglądamy pierwszy bajt bez przesuwania pozycji (chyba że chcemy przesunąć)
+        return buffer.get(0)
     }
 
     fun decodePlayerPosition(buffer: ByteBuffer): DecodedPosition {
-        buffer.get() // Skip header (zakładamy, że już sprawdziliśmy typ)
+        buffer.get() // Skip header
         val pid = buffer.get()
 
         val x = buffer.float.toDouble()
         val y = buffer.float.toDouble()
         val z = buffer.float.toDouble()
 
-        // Dekompresja kątów
         val yawByte = buffer.get().toUByte().toInt()
         val pitchByte = buffer.get().toUByte().toInt()
 
@@ -262,11 +411,20 @@ object NetworkProtocol {
         return DecodedPosition(pid, x, y, z, yaw, pitch)
     }
 
+    fun decodePlayerDimension(buffer: ByteBuffer): DecodedDimension {
+        buffer.get() // Skip header
+        val pid = buffer.get()
+        val len = buffer.int
+        val bytes = ByteArray(len)
+        buffer.get(bytes)
+        return DecodedDimension(pid, String(bytes, Charsets.UTF_8))
+    }
+
     fun decodeBlockChange(buffer: ByteBuffer): DecodedBlock {
         buffer.get() // Skip header
         val x = buffer.int
         val z = buffer.int
-        val y = buffer.get().toInt() and 0xFF // Konwersja unsigned byte do int
+        val y = buffer.get().toInt() and 0xFF
         val color = buffer.int
         val metadata = if (buffer.hasRemaining()) buffer.get() else 0
 
@@ -277,40 +435,31 @@ object NetworkProtocol {
         buffer.get() // Skip header
         val cx = buffer.int
         val cz = buffer.int
-        
+
         val totalSize = 16 * 128 * 16
         val blocks = IntArray(totalSize)
         val metadata = ByteArray(totalSize)
-        
-        // 1. Dekodowanie Bloków
+
         var index = 0
         while (buffer.hasRemaining() && index < totalSize) {
-            // Zabezpieczenie: Musimy mieć co najmniej 5 bajtów (1 byte count + 4 bytes int)
             if (buffer.remaining() < 5) break
-            
-            val count = buffer.get().toInt() and 0xFF // Unsigned byte
+            val count = buffer.get().toInt() and 0xFF
             val color = buffer.int
-            
             for (i in 0 until count) {
                 if (index < totalSize) blocks[index++] = color
             }
         }
-        
-        // 2. Dekodowanie Metadanych
-        // Jeśli bufor ma jeszcze dane, to są to metadane. Jeśli nie (stary serwer?), zostaną zera.
+
         index = 0
         while (buffer.hasRemaining() && index < totalSize) {
-            // Zabezpieczenie: Musimy mieć co najmniej 2 bajty (1 byte count + 1 byte meta)
             if (buffer.remaining() < 2) break
-            
             val count = buffer.get().toInt() and 0xFF
             val meta = buffer.get()
-            
             for (i in 0 until count) {
                 if (index < totalSize) metadata[index++] = meta
             }
         }
-        
+
         return DecodedChunk(cx, cz, blocks, metadata)
     }
 
@@ -324,7 +473,6 @@ object NetworkProtocol {
         val blocks = IntArray(sectionSize)
         val metadata = ByteArray(sectionSize)
 
-        // 1. Dekodowanie Bloków
         var index = 0
         while (buffer.hasRemaining() && index < sectionSize) {
             if (buffer.remaining() < 5) break
@@ -335,7 +483,6 @@ object NetworkProtocol {
             }
         }
 
-        // 2. Dekodowanie Metadanych
         index = 0
         while (buffer.hasRemaining() && index < sectionSize) {
             if (buffer.remaining() < 2) break
@@ -371,7 +518,12 @@ object NetworkProtocol {
             val yaw = (yawByte / 255.0) * (2 * PI)
             val pitch = (pitchByte / 255.0) * PI - (PI / 2)
 
-            map[id] = RemotePlayer(x, y, z, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis())
+            val dimLen = buffer.int
+            val dimBytes = ByteArray(dimLen)
+            buffer.get(dimBytes)
+            val dimension = String(dimBytes, Charsets.UTF_8)
+
+            map[id] = RemotePlayer(x, y, z, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), dimension)
         }
         return map
     }

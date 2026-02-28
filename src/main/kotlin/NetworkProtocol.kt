@@ -216,6 +216,53 @@ object NetworkProtocol {
         return buffer
     }
 
+    /**
+     * Pakuje CAŁY chunk (16x16x128) używając RLE.
+     * To jest znacznie wydajniejsze niż wysyłanie 8 osobnych sekcji.
+     */
+    fun encodeChunk(cx: Int, cz: Int, chunkBlocks: IntArray, chunkMeta: ByteArray): ByteBuffer {
+        // Alokujemy bezpieczny bufor (np. 128KB), ale zazwyczaj zużyjemy < 10KB
+        val buffer = ByteBuffer.allocateDirect(131072)
+        buffer.put(PACKET_CHUNK_DATA)
+        buffer.putInt(cx)
+        buffer.putInt(cz)
+
+        val totalSize = 16 * 128 * 16 // 32768 bloków
+
+        // 1. Kompresja Bloków (Int) - Cała tablica naraz
+        var i = 0
+        while (i < totalSize) {
+            if (buffer.position() > 130000) break // Zabezpieczenie przed overflow
+            val currentBlock = chunkBlocks[i]
+            var count = 1
+
+            // Zliczamy powtórzenia (max 255 w jednym bajcie)
+            while (i + count < totalSize && chunkBlocks[i + count] == currentBlock && count < 255) {
+                count++
+            }
+            buffer.put(count.toByte())
+            buffer.putInt(currentBlock)
+            i += count
+        }
+
+        // 2. Kompresja Metadanych (Byte) - Cała tablica naraz
+        i = 0
+        while (i < totalSize) {
+            if (buffer.position() > 130000) break
+            val currentMeta = chunkMeta[i]
+            var count = 1
+            while (i + count < totalSize && chunkMeta[i + count] == currentMeta && count < 255) {
+                count++
+            }
+            buffer.put(count.toByte())
+            buffer.put(currentMeta)
+            i += count
+        }
+
+        buffer.flip()
+        return buffer
+    }
+
     fun encodeChunkRequest(cx: Int, cz: Int): ByteBuffer {
         val buffer = ByteBuffer.allocate(9)
         buffer.put(PACKET_CHUNK_REQUEST)

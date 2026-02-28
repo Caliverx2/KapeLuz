@@ -12,6 +12,7 @@ import java.io.FileOutputStream
 import java.io.EOFException
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Zwraca listę nazw światów (folderów) znajdujących się w katalogu zapisu gry.
@@ -58,73 +59,76 @@ open class ChunkIO(worldName: String) {
     // Używamy scentralizowanego folderu gry zdefiniowanego w KapeLuzModAPI.kt
     val saveDir = File(gameDir, "saves/$worldName").apply { mkdirs() }
 
-    // Cache otwartych plików regionów (opcjonalne, dla wydajności przy częstym zapisie)
-    // W tej implementacji otwieramy/zamykamy plik przy każdej operacji dla bezpieczeństwa danych.
+    // --- FIX: Race Condition ---
+    // Mapa zamków (locków) dla każdego pliku regionu, aby zapobiec jednoczesnemu zapisowi i odczytowi z różnych wątków.
+    // To rozwiązuje błąd EOFException, gdy Host teleportuje się do wymiaru, który jest w tle modyfikowany przez klienta.
+    private val regionFileLocks = ConcurrentHashMap<File, Any>()
+    private fun getLockForFile(file: File): Any = regionFileLocks.computeIfAbsent(file) { Any() }
 
     open fun saveChunk(chunk: Chunk, dimension: String = "overworld") {
-        try {
-            // Obliczamy koordynaty regionu
-            val regionX = chunk.x shr 5 // Dzielenie przez 32 (bit shift)
-            val regionZ = chunk.z shr 5
+        val regionX = chunk.x shr 5
+        val regionZ = chunk.z shr 5
+        val regionDir = File(saveDir, "dimensions/$dimension/regions").apply { mkdirs() }
+        val regionFile = File(regionDir, "r_${regionX}_${regionZ}.rgn")
 
-            val regionDir = File(saveDir, "dimensions/$dimension/regions")
-            regionDir.mkdirs()
-            val regionFile = File(regionDir, "r_${regionX}_${regionZ}.rgn")
+        // Synchronizujemy operacje na pliku regionu
+        synchronized(getLockForFile(regionFile)) {
+            try {
+                // Kompresja chunka do pamięci RAM (Palette + RLE)
+                val compressedData = ChunkCompressor.compress(chunk)
 
-            // Kompresja chunka do pamięci RAM (Palette + RLE)
-            val compressedData = ChunkCompressor.compress(chunk)
+                RandomAccessFile(regionFile, "rw").use { raf ->
+                    // FIX: Inicjalizacja nagłówka, jeśli plik jest nowy/pusty
+                    // Nagłówek dla 1024 chunków zajmuje 8192 bajty (1024 * 8)
+                    if (raf.length() < 8192) {
+                        raf.seek(0)
+                        raf.write(ByteArray(8192)) // Wypełniamy zerami
+                    }
 
-            RandomAccessFile(regionFile, "rw").use { raf ->
-                // FIX: Inicjalizacja nagłówka, jeśli plik jest nowy/pusty
-                // Nagłówek dla 1024 chunków zajmuje 8192 bajty (1024 * 8)
-                if (raf.length() < 8192) {
-                    raf.seek(0)
-                    raf.write(ByteArray(8192)) // Wypełniamy zerami
-                }
+                    // Obliczamy lokalny indeks chunka w regionie (0..1023)
+                    // x & 31 to modulo 32
+                    val localX = if (chunk.x < 0) (chunk.x % 32 + 32) % 32 else chunk.x % 32
+                    val localZ = if (chunk.z < 0) (chunk.z % 32 + 32) % 32 else chunk.z % 32
+                    val chunkIndex = localX + (localZ * 32)
 
-                // Obliczamy lokalny indeks chunka w regionie (0..1023)
-                // x & 31 to modulo 32
-                val localX = if (chunk.x < 0) (chunk.x % 32 + 32) % 32 else chunk.x % 32
-                val localZ = if (chunk.z < 0) (chunk.z % 32 + 32) % 32 else chunk.z % 32
-                val chunkIndex = localX + (localZ * 32)
-
-                // Nagłówek regionu: 1024 wpisy * 8 bajtów (4 bajty offset + 4 bajty długość)
-                // Offset to pozycja w pliku, gdzie zaczynają się dane chunka.
-                val headerOffset = chunkIndex * 8
-                raf.seek(headerOffset.toLong())
-                
-                val currentOffset = raf.readInt()
-                val currentLength = raf.readInt()
-
-                val newDataLength = compressedData.size
-
-                // Strategia zapisu:
-                // 1. Jeśli chunk nie istniał (offset 0) -> Dopisz na koniec pliku.
-                // 2. Jeśli chunk istniał, ale nowe dane są większe niż stare miejsce -> Dopisz na koniec pliku (stare miejsce staje się "śmieciem").
-                // 3. Jeśli chunk istniał i nowe dane się mieszczą -> Nadpisz w starym miejscu.
-
-                var writeOffset = currentOffset
-
-                if (currentOffset == 0 || newDataLength > currentLength) {
-                    // Dopisz na koniec
-                    writeOffset = raf.length().toInt()
-                    // Aktualizuj nagłówek
+                    // Nagłówek regionu: 1024 wpisy * 8 bajtów (4 bajty offset + 4 bajty długość)
+                    // Offset to pozycja w pliku, gdzie zaczynają się dane chunka.
+                    val headerOffset = chunkIndex * 8
                     raf.seek(headerOffset.toLong())
-                    raf.writeInt(writeOffset)
-                    raf.writeInt(newDataLength)
-                } else {
-                    // Nadpisz (aktualizuj tylko długość w nagłówku, offset bez zmian)
-                    raf.seek((headerOffset + 4).toLong())
-                    raf.writeInt(newDataLength)
+
+                    val currentOffset = raf.readInt()
+                    val currentLength = raf.readInt()
+
+                    val newDataLength = compressedData.size
+
+                    // Strategia zapisu:
+                    // 1. Jeśli chunk nie istniał (offset 0) -> Dopisz na koniec pliku.
+                    // 2. Jeśli chunk istniał, ale nowe dane są większe niż stare miejsce -> Dopisz na koniec pliku (stare miejsce staje się "śmieciem").
+                    // 3. Jeśli chunk istniał i nowe dane się mieszczą -> Nadpisz w starym miejscu.
+
+                    var writeOffset = currentOffset
+
+                    if (currentOffset == 0 || newDataLength > currentLength) {
+                        // Dopisz na koniec
+                        writeOffset = raf.length().toInt()
+                        // Aktualizuj nagłówek
+                        raf.seek(headerOffset.toLong())
+                        raf.writeInt(writeOffset)
+                        raf.writeInt(newDataLength)
+                    } else {
+                        // Nadpisz (aktualizuj tylko długość w nagłówku, offset bez zmian)
+                        raf.seek((headerOffset + 4).toLong())
+                        raf.writeInt(newDataLength)
+                    }
+
+                    // Zapisz właściwe dane
+                    raf.seek(writeOffset.toLong())
+                    raf.write(compressedData)
                 }
 
-                // Zapisz właściwe dane
-                raf.seek(writeOffset.toLong())
-                raf.write(compressedData)
+            } catch (e: IOException) {
+                e.printStackTrace()
             }
-
-        } catch (e: IOException) {
-            e.printStackTrace()
         }
     }
 
@@ -141,30 +145,33 @@ open class ChunkIO(worldName: String) {
 
         if (!regionFile.exists()) return null
 
-        try {
-            RandomAccessFile(regionFile, "r").use { raf ->
-                // FIX: Jeśli plik jest krótszy niż nagłówek, to jest nieprawidłowy/pusty
-                if (raf.length() < 8192) return null
+        // Synchronizujemy operacje na pliku regionu
+        synchronized(getLockForFile(regionFile)) {
+            try {
+                RandomAccessFile(regionFile, "r").use { raf ->
+                    // FIX: Jeśli plik jest krótszy niż nagłówek, to jest nieprawidłowy/pusty
+                    if (raf.length() < 8192) return null
 
-                val localX = if (cx < 0) (cx % 32 + 32) % 32 else cx % 32
-                val localZ = if (cz < 0) (cz % 32 + 32) % 32 else cz % 32
-                val chunkIndex = localX + (localZ * 32)
+                    val localX = if (cx < 0) (cx % 32 + 32) % 32 else cx % 32
+                    val localZ = if (cz < 0) (cz % 32 + 32) % 32 else cz % 32
+                    val chunkIndex = localX + (localZ * 32)
 
-                raf.seek((chunkIndex * 8).toLong())
-                val offset = raf.readInt()
-                val length = raf.readInt()
+                    raf.seek((chunkIndex * 8).toLong())
+                    val offset = raf.readInt()
+                    val length = raf.readInt()
 
-                if (offset == 0 || length <= 0) return null // Chunk nie istnieje w tym regionie
+                    if (offset == 0 || length <= 0) return null // Chunk nie istnieje w tym regionie
 
-                val data = ByteArray(length)
-                raf.seek(offset.toLong())
-                raf.readFully(data)
+                    val data = ByteArray(length)
+                    raf.seek(offset.toLong())
+                    raf.readFully(data)
 
-                return ChunkCompressor.decompress(data, cx, cz)
+                    return ChunkCompressor.decompress(data, cx, cz)
+                }
+            } catch (e: IOException) {
+                e.printStackTrace()
+                return null
             }
-        } catch (e: IOException) {
-            e.printStackTrace()
-            return null
         }
     }
 
@@ -271,6 +278,9 @@ open class ChunkIO(worldName: String) {
                     // W tym prostym formacie zakładamy, że RLE bloków wypełni całą tablicę blocks.
                     // Jeśli dis.available() > 0 po wypełnieniu bloków, to reszta to metadane.
                     
+                    // FIX: Bardziej rygorystyczne sprawdzanie, aby uniknąć EOFException
+                    if (dis.available() < 3) break // Potrzebujemy 1 bajtu na count i 2 na indeks
+
                     val count = dis.readUnsignedByte()
                     val paletteIndex = dis.readShort().toInt() and 0xFFFF
                     val color = if (paletteIndex < paletteSize) palette[paletteIndex] else 0
@@ -286,6 +296,8 @@ open class ChunkIO(worldName: String) {
                 var metaIdx = 0
                 val totalMeta = chunk.metadata.size
                 while (metaIdx < totalMeta && dis.available() > 0) {
+                    if (dis.available() < 2) break // Potrzebujemy 1 na count i 1 na meta
+
                     val count = dis.readUnsignedByte()
                     val metaValue = dis.readByte()
 

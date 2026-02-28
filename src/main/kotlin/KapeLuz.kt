@@ -158,7 +158,7 @@ class KapeLuz : JPanel() {
         }
     var renderDistance = 5
     var debugChunkRenderDistance = 1
-    var simulateFluidsDistance = 1
+    var simulationDistance = 1
     var speed = 0.3
     var currentSpeed = speed
     val rotationalSpeed = 0.1
@@ -422,11 +422,11 @@ class KapeLuz : JPanel() {
     private var lastPlayerListBroadcast = 0L
     private var lastKeepAliveSent = 0L
 
-    data class ChunkSectionTask(val cx: Int, val cz: Int, val sectionY: Int)
+    data class ChunkTask(val cx: Int, val cz: Int) // Zmiana: Zadanie dotyczy całego chunka
 
     inner class ChunkStreamer {
         // Kolejka sekcji do wysłania dla każdego gracza
-        private val pendingSectionsPerPlayer = ConcurrentHashMap<String, ConcurrentLinkedQueue<ChunkSectionTask>>()
+        private val pendingSectionsPerPlayer = ConcurrentHashMap<String, ConcurrentLinkedQueue<ChunkTask>>()
         // Zbiór wysłanych chunków dla każdego gracza (żeby nie wysyłać duplikatów)
         private val chunksSentPerPlayer = ConcurrentHashMap<String, ConcurrentHashMap.KeySetView<Point, Boolean>>()
 
@@ -439,11 +439,8 @@ class KapeLuz : JPanel() {
                 sentSet.remove(p) // Pozwalamy na ponowne wysłanie
             }
             if (!sentSet.contains(p)) {
-                // Dzielimy chunk na 8 sekcji (128 wysokości / 16) i kolejkujemy je
-                // FIX: Kolejkujemy od góry do dołu (7 downTo 0), aby powierzchnia ładowała się szybciej niż jaskinie.
-                for (y in 7 downTo 0) {
-                    queue.add(ChunkSectionTask(cx, cz, y))
-                }
+                // OPTYMALIZACJA: Kolejkujemy cały chunk jako jedno zadanie
+                queue.add(ChunkTask(cx, cz))
                 sentSet.add(p) // Oznaczamy chunk jako "w trakcie wysyłania/wysłany"
             }
         }
@@ -472,10 +469,10 @@ class KapeLuz : JPanel() {
                 var lastChunkPos: Point? = null
                 var lastChunk: Chunk? = null
 
-                var sectionsSent = 0
-                val maxSectionsPerTick = 4 // Limit wysyłania sekcji na tick (zapobiega pikom CPU i sieci)
+                var chunksSent = 0
+                val maxChunksPerTick = 2 // Zmniejszamy limit ilościowy, bo pakiety są teraz większe (ale jest ich mniej)
 
-                while (!queue.isEmpty() && currentBuffered < targetBufferFill && sectionsSent < maxSectionsPerTick) {
+                while (!queue.isEmpty() && currentBuffered < targetBufferFill && chunksSent < maxChunksPerTick) {
                     val task = queue.peek() // Podglądamy zadanie
                     val p = Point(task.cx, task.cz)
 
@@ -503,12 +500,12 @@ class KapeLuz : JPanel() {
                         lastChunk = chunk
                         lastChunkPos = p
                         try {
-                            // Wysyłamy tylko jedną sekcję
-                            val packet = NetworkProtocol.encodeChunkSection(task.cx, task.cz, task.sectionY, chunk.blocks, chunk.metadata)
+                            // OPTYMALIZACJA: Wysyłamy CAŁY chunk w jednym pakiecie
+                            val packet = NetworkProtocol.encodeChunk(task.cx, task.cz, chunk.blocks, chunk.metadata)
                             currentBuffered += packet.remaining()
                             rtcManager.sendData(packet)
                             queue.poll() // Usuwamy zadanie dopiero po sukcesie
-                            sectionsSent++
+                            chunksSent++
                         } catch (e: Exception) {
                             println("Błąd wysyłania chunka ${p.x}, ${p.y} do $playerId: ${e.message}")
                             queue.poll() // Usuwamy błędne zadanie, żeby nie blokować kolejki
@@ -1331,6 +1328,9 @@ class KapeLuz : JPanel() {
                                                 val spawnY = data.y * cubeSize - 10.0
                                                 val spawnZ = data.z * cubeSize
                                                 val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                                                itemEntity.velX = (Math.random() - 0.5) * 0.2
+                                                itemEntity.velY = (Math.random() - 0.5) * 0.2
+                                                itemEntity.velZ = (Math.random() - 0.5) * 0.2
                                                 // Spawnujemy w wymiarze gracza, który zniszczył blok
                                                 spawnEntity(itemEntity, senderDim)
                                             }
@@ -1359,6 +1359,9 @@ class KapeLuz : JPanel() {
                                                         val spawnY = data.y * cubeSize - 10.0
                                                         val spawnZ = data.z * cubeSize
                                                         val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                                                        itemEntity.velX = (Math.random() - 0.5) * 0.2
+                                                        itemEntity.velY = (Math.random() - 0.5) * 0.2
+                                                        itemEntity.velZ = (Math.random() - 0.5) * 0.2
                                                         spawnEntity(itemEntity, senderDim)
                                                     }
                                                 }
@@ -1445,7 +1448,11 @@ class KapeLuz : JPanel() {
                                                 chunk = chunkGenerator.generate(req.cx, req.cz) // Generator jest generyczny
                                                 chunkIO.saveChunk(chunk, playerDim)
                                             }
-                                            chunks.putIfAbsent(p, chunk)
+                                            
+                                            // FIX: Dodajemy do pamięci Hosta tylko jeśli wymiary się zgadzają
+                                            if (playerDim == localDimension) {
+                                                chunks.putIfAbsent(p, chunk)
+                                            }
                                             // Kolejkujemy chunk dla KONKRETNEGO gracza
                                             chunkStreamer.queueChunk(targetId, req.cx, req.cz, force = true)
                                         } catch (e: Exception) {
@@ -2399,11 +2406,14 @@ class KapeLuz : JPanel() {
                     // Zamiast dodawać od razu, tworzymy ItemEntity
                     val itemStack = ItemStack(rawBlock, 1)
                     // Pozycja środka bloku: (x + 0.5) * cubeSize, Y przesunięte o -10.0
-                    val spawnX = (x) * cubeSize
-                    val spawnY = (y) * cubeSize - 10.0
-                    val spawnZ = (z) * cubeSize
+                        val spawnX = (x) * cubeSize
+                        val spawnY = (y) * cubeSize - 10.0
+                        val spawnZ = (z) * cubeSize
                     // Timeout 10 ticków (0.5s), brak prędkości początkowej (tylko grawitacja w updateEntities)
                     val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                    itemEntity.velX = (Math.random() - 0.5) * 0.2
+                    itemEntity.velY = (Math.random() - 0.5) * 0.2
+                    itemEntity.velZ = (Math.random() - 0.5) * 0.2
                     // W Multiplayerze niszczenie bloku jest obsługiwane przez Hosta (który wyśle spawn itemu),
                     // ale tutaj mamy logikę lokalną.
                     // FIX: Jeśli jesteśmy klientem, NIE spawnujemy itemu lokalnie (czekamy na pakiet od Hosta lub Host spawnuje).
@@ -2523,6 +2533,9 @@ class KapeLuz : JPanel() {
                         val spawnY = (y) * cubeSize - 10.0
                         val spawnZ = (z) * cubeSize
                         val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
+                        itemEntity.velX = (Math.random() - 0.5) * 0.2
+                        itemEntity.velY = (Math.random() - 0.5) * 0.2
+                        itemEntity.velZ = (Math.random() - 0.5) * 0.2
                         if (!isMultiplayerClient) {
                             spawnEntity(itemEntity, localDimension)
                         }
@@ -3022,7 +3035,7 @@ class KapeLuz : JPanel() {
                                         other.itemStack.count += transfer
                                         entity.itemStack.count -= transfer
                                         other.pickupDelay = maxOf(other.pickupDelay, entity.pickupDelay)
-                                        other.age = 0 // Odświeżamy wiek "zwycięzcy"
+                                        other.age = 0L // Odświeżamy wiek "zwycięzcy"
 
                                         if (entity.itemStack.count <= 0) {
                                             iterator.remove()
@@ -3350,7 +3363,7 @@ class KapeLuz : JPanel() {
 
         // FIX: Wyznaczamy aktywne chunki wokół wszystkich graczy (Host + Klienci)
         val activeChunks = HashSet<Point>()
-        val radius = simulateFluidsDistance
+        val radius = simulationDistance
 
         // 1. Wokół lokalnego gracza (Hosta/Singleplayer)
         val currentChunkX = floor(camX / 32.0).toInt()
@@ -5716,6 +5729,9 @@ class KapeLuz : JPanel() {
                 }
                 if (keyCode == KeyEvent.VK_F3) {
                     showChunkBorders = !showChunkBorders
+                }
+                if (keyCode == KeyEvent.VK_F4) {
+                    showSectionBorders = !showSectionBorders
                 }
                 if (keyCode == KeyEvent.VK_X) {
                     debugXray = !debugXray

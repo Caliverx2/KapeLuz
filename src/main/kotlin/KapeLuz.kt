@@ -1887,14 +1887,42 @@ class KapeLuz : JPanel() {
     }
 
     fun changeDimension(dim: String) {
+        // FIX: Save entities before clearing chunks to prevent them from falling into void or duplicating
+        val entitiesToSave = entities.filter { it.dimension == localDimension }
+        val entitiesByChunk = entitiesToSave.groupBy {
+            val bx = floor(it.x / cubeSize).toInt()
+            val cx = if (bx >= 0) bx / 16 else (bx + 1) / 16 - 1
+            val bz = floor(it.z / cubeSize).toInt()
+            val cz = if (bz >= 0) bz / 16 else (bz + 1) / 16 - 1
+            Point(cx, cz)
+        }
+
         var savedCount = 0
-        chunks.values.forEach { chunk ->
+        chunks.forEach { (p, chunk) ->
+            val ent = entitiesByChunk[p]
+            if (ent != null) {
+                chunk.storedEntities.addAll(ent)
+                chunk.modified = true
+            }
             if (chunk.modified) {
                 chunkIO.saveChunk(chunk, localDimension)
                 chunk.modified = false
                 savedCount++
             }
         }
+
+        // Handle entities in unloaded chunks
+        entitiesByChunk.forEach { (p, ents) ->
+            if (!chunks.containsKey(p)) {
+                ents.forEach { entity ->
+                    chunkIO.saveEntityToChunk(p.x, p.y, entity, localDimension)
+                }
+            }
+        }
+
+        // Remove saved entities from RAM
+        entities.removeIf { it.dimension == localDimension }
+
         chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension))
         if (savedCount > 0) println("Auto-saved $savedCount chunks in $localDimension.")
 
@@ -2491,14 +2519,15 @@ class KapeLuz : JPanel() {
                                 // Optimization: Send block updates only to players in the same dimension
                                 val netId = playerNetIds[pid]
                                 val pDim = if (netId != null) remotePlayers[netId]?.dimension ?: "overworld" else "overworld"
-                                if (pDim == localDimension) {
-                                try {
-                                    val packet = NetworkProtocol.encodeBlockChange(lastX, lastY, lastZ, stack.color, metaToSet)
-                                    rtc.sendData(packet)
-                                } catch (e: Exception) {
-                                    println("Błąd wysyłania bloku: ${e.message}")
+                                // FIX: Client sends to Host always. Host sends to players in same dimension.
+                                if (!isHost || pDim == localDimension) {
+                                    try {
+                                        val packet = NetworkProtocol.encodeBlockChange(lastX, lastY, lastZ, stack.color, metaToSet)
+                                        rtc.sendData(packet)
+                                    } catch (e: Exception) {
+                                        println("Błąd wysyłania bloku: ${e.message}")
+                                    }
                                 }
-                            }
                             }
 
                             // Jeśli stawiamy płyn (np. lawę), ustawiamy go jako źródło
@@ -2548,13 +2577,14 @@ class KapeLuz : JPanel() {
                     peerConnections.forEach { (pid, rtc) ->
                         val netId = playerNetIds[pid]
                         val pDim = if (netId != null) remotePlayers[netId]?.dimension ?: "overworld" else "overworld"
-                        if (pDim == localDimension) {
-                        try {
-                            val packet = NetworkProtocol.encodeBlockChange(x, y, z, 0, 0) // Meta 0 dla powietrza
-                            rtc.sendData(packet)
-                        } catch (e: Exception) {
-                            println("Błąd wysyłania zniszczenia bloku: ${e.message}")
-                        }
+                        // FIX: Client sends to Host always. Host sends to players in same dimension.
+                        if (!isHost || pDim == localDimension) {
+                            try {
+                                val packet = NetworkProtocol.encodeBlockChange(x, y, z, 0, 0) // Meta 0 dla powietrza
+                                rtc.sendData(packet)
+                            } catch (e: Exception) {
+                                println("Błąd wysyłania zniszczenia bloku: ${e.message}")
+                            }
                         }
                     }
                 }

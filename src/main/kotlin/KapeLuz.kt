@@ -40,7 +40,7 @@ data class Triangle3d(
 data class ModelVoxel(val x: Int, val y: Int, val z: Int, val color: Color, val isVoid: Boolean = false)
 
 // Struktura dla innych graczy (Multiplayer)
-data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0, var dimension: String = "overworld", var hasReceivedEntities: Boolean = false)
+data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0, var dimension: String = "overworld", var hasReceivedEntities: Boolean = false, var bodyYaw: Double = yaw)
 
 abstract class Entity(
     var x: Double, var y: Double, var z: Double,
@@ -4374,20 +4374,18 @@ class KapeLuz : JPanel() {
             // Render only if in same dimension
             if (player.dimension != localDimension) return@forEach
             if (myIdByte != null && id == myIdByte) return@forEach
-            // Proste renderowanie gracza jako pudełka (hitboxa)
-            // W przyszłości podmień to na model 3D
-            val pPos = BlockPos(
-                (floor((player.x + (cubeSize/2))/2)).toInt(),
-                (floor((player.y + (cubeSize/2))/2)+5).toInt(),
-                (floor((player.z + (cubeSize/2))/2)).toInt()
-            )
-            val pPos2 = BlockPos(
-                (floor((player.x + (cubeSize/2))/2)).toInt(),
-                (floor((player.y + (cubeSize/2))/2)+4).toInt(),
-                (floor((player.z + (cubeSize/2))/2)).toInt()
-            )
-            drawSelectionBox(pPos)
-            drawSelectionBox(pPos2)
+
+            // Body rotation logic
+            var diff = player.yaw - player.bodyYaw
+            // Normalize diff to -PI..PI
+            while (diff < -Math.PI) diff += 2 * Math.PI
+            while (diff > Math.PI) diff -= 2 * Math.PI
+
+            val limit = Math.toRadians(80.0)
+            if (diff > limit) player.bodyYaw = player.yaw - limit
+            else if (diff < -limit) player.bodyYaw = player.yaw + limit
+
+            renderPlayerModel(player)
         }
 
         // --- MOD HOOK: 3D Rendering ---
@@ -4535,6 +4533,91 @@ class KapeLuz : JPanel() {
         if (moonY > -200.0) {
             drawCelestialBody(moonX, moonY, moonZ, 15.0, Color(200, 200, 220).rgb, false)
         }
+    }
+
+    private fun renderPlayerModel(player: RemotePlayer) {
+        val s = cubeSize
+        val headSize = 0.5 * s
+        val thickness = headSize / 3.0
+        val torsoWidth = headSize
+        val torsoHeight = 0.75 * s
+        val legHeight = 0.75 * s
+        val armHeight = torsoHeight
+
+        val skinColor = Color(255, 200, 150)
+        val shirtColor = Color(0, 0, 200)
+        val pantsColor = Color(50, 0, 150)
+
+        val px = player.x; val py = player.y - (1.75 * cubeSize); val pz = player.z
+        val bYaw = -player.bodyYaw; val hYaw = -player.yaw; val hPitch = player.pitch
+
+        fun processAndDrawTriangle(p1: Vector3d, p2: Vector3d, p3: Vector3d, color: Color, lightVal: Int) {
+            val t1 = transform(p1); val t2 = transform(p2); val t3 = transform(p3)
+            val line1 = Vector3d(t2.x - t1.x, t2.y - t1.y, t2.z - t1.z)
+            val line2 = Vector3d(t3.x - t1.x, t3.y - t1.y, t3.z - t1.z)
+            val normal = Vector3d(line1.y * line2.z - line1.z * line2.y, line1.z * line2.x - line1.x * line2.z, line1.x * line2.y - line1.y * line2.x)
+
+            if (t1.x * normal.x + t1.y * normal.y + t1.z * normal.z > 0) {
+                val clipped = clipTriangleAgainstPlane(Triangle3d(t1, t2, t3, color, lightVal))
+                for (c in clipped) {
+                    val packedLight = c.lightLevel
+                    val skyLight = (packedLight shr 4) and 0xF; val blockLight = packedLight and 0xF
+                    val wx = (c.p1.x + camX).toInt(); val wy = (c.p1.y + viewY).toInt(); val wz = (c.p1.z + camZ).toInt()
+                    val finalRGB = if (!debugFullbright) {
+                        lightProcessor.process(wx, wy, wz, c.color, skyLight, blockLight, globalSunIntensity, minLightFactor)
+                    } else { c.color.rgb }
+                    fillTriangle(project(c.p1), project(c.p2), project(c.p3), c.p1, c.p2, c.p3, Color(finalRGB))
+                }
+            }
+        }
+
+        fun drawPart(cx: Double, cy: Double, cz: Double, sx: Double, sy: Double, sz: Double, color: Color, partYaw: Double, partPitch: Double = 0.0, pivotY: Double = 0.0) {
+            val dx = sx / 2.0; val dy = sy / 2.0; val dz = sz / 2.0
+            val corners = arrayOf(
+                Vector3d(cx - dx, cy - dy, cz - dz), Vector3d(cx + dx, cy - dy, cz - dz),
+                Vector3d(cx + dx, cy + dy, cz - dz), Vector3d(cx - dx, cy + dy, cz - dz),
+                Vector3d(cx - dx, cy - dy, cz + dz), Vector3d(cx + dx, cy - dy, cz + dz),
+                Vector3d(cx + dx, cy + dy, cz + dz), Vector3d(cx - dx, cy + dy, cz + dz)
+            )
+            for (v in corners) {
+                if (partPitch != 0.0) {
+                    val vy = v.y - pivotY; val vz = v.z
+                    val cosP = cos(partPitch); val sinP = sin(partPitch)
+                    v.y = (vy * cosP - vz * sinP) + pivotY
+                    v.z = vz * cosP + vy * sinP
+                }
+                val cosY = cos(partYaw); val sinY = sin(partYaw)
+                val nx = v.x * cosY - v.z * sinY
+                val nz = v.z * cosY + v.x * sinY
+                v.x = nx + px; v.y = v.y + py; v.z = nz + pz
+            }
+            val faces = arrayOf(
+                intArrayOf(0, 1, 2, 3), intArrayOf(5, 4, 7, 6), intArrayOf(4, 0, 3, 7),
+                intArrayOf(1, 5, 6, 2), intArrayOf(3, 2, 6, 7), intArrayOf(4, 5, 1, 0)
+            )
+            val lightX = floor(px / cubeSize).toInt()
+            val lightY = floor((py + cy + 10.0) / cubeSize).toInt()
+            val lightZ = floor(pz / cubeSize).toInt()
+            val lightVal = getLight(lightX, lightY, lightZ)
+
+            for (face in faces) {
+                processAndDrawTriangle(corners[face[0]], corners[face[1]], corners[face[2]], color, lightVal)
+                processAndDrawTriangle(corners[face[0]], corners[face[2]], corners[face[3]], color, lightVal)
+            }
+        }
+
+        // Left Leg
+        drawPart(-thickness/2, legHeight/2, 0.0, thickness, legHeight, thickness, pantsColor, bYaw)
+        // Right Leg
+        drawPart(thickness/2, legHeight/2, 0.0, thickness, legHeight, thickness, pantsColor, bYaw)
+        // Torso
+        drawPart(0.0, legHeight + torsoHeight/2, 0.0, torsoWidth, torsoHeight, thickness, shirtColor, bYaw)
+        // Head
+        drawPart(0.0, legHeight + torsoHeight + headSize/2, 0.0, headSize, headSize, headSize, skinColor, hYaw, hPitch, legHeight + torsoHeight)
+        // Left Arm
+        drawPart(-(torsoWidth/2 + thickness/2), legHeight + torsoHeight/2, 0.0, thickness, armHeight, thickness, skinColor, bYaw)
+        // Right Arm
+        drawPart((torsoWidth/2 + thickness/2), legHeight + torsoHeight/2, 0.0, thickness, armHeight, thickness, skinColor, bYaw)
     }
 
     private fun renderClouds() {

@@ -4544,7 +4544,7 @@ class KapeLuz : JPanel() {
         val legHeight = 0.75 * s
         val armHeight = torsoHeight
 
-        val skinColor = Color(255, 200, 150)
+        val skinColor = Color(255, 200, 150) //in progress playermodel
         val shirtColor = Color(0, 0, 200)
         val pantsColor = Color(50, 0, 150)
 

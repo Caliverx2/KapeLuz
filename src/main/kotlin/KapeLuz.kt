@@ -147,9 +147,7 @@ class KapeLuz : JPanel() {
     var camZ = 0.0
     var yaw = 0.0
     var pitch = 0.0
-        set(value) {
-            field = value.coerceIn(-Math.PI / 2, Math.PI / 2)
-        }
+    var myBodyYaw = 0.0
     // Getter dla pozycji oczu (uwzględnia kucanie)
     val viewY: Double
         get() {
@@ -1166,10 +1164,10 @@ class KapeLuz : JPanel() {
                                         val player = remotePlayers.getOrPut(netId) {
                                             println("Nowy gracz ($netId) pojawił się na hoście.")
                                             // Inicjalizujemy z domyślną pozycją i wymiarem, zostaną natychmiast nadpisane
-                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, 0L, 0L, "overworld")
+                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, 0L, 0L, "overworld", false, 0.0)
                                         }
                                         player.apply {
-                                            x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch
+                                            x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch; bodyYaw = data.bodyYaw
                                             lastUpdate = System.currentTimeMillis()
                                             if (lastKeepAlive == 0L) lastKeepAlive = System.currentTimeMillis() // Inicjalizacja
                                         }
@@ -1188,7 +1186,7 @@ class KapeLuz : JPanel() {
                                         }
 
                                         // Relay: Host wysyła tę pozycję do innych, podmieniając ID w pakiecie na ID nadawcy
-                                        val relayedPacket = NetworkProtocol.encodePlayerPosition(netId, data.x, data.y, data.z, data.yaw, data.pitch)
+                                        val relayedPacket = NetworkProtocol.encodePlayerPosition(netId, data.x, data.y, data.z, data.yaw, data.pitch, data.bodyYaw)
 
                                         // Wysyłamy do wszystkich OPRÓCZ nadawcy
                                         peerConnections.forEach { (pid, rtc) ->
@@ -1204,7 +1202,7 @@ class KapeLuz : JPanel() {
                                         remotePlayers.getOrPut(data.playerId) {
                                             // Gracz pojawił się między aktualizacjami listy graczy
                                             RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0)
-                                        }.apply { x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch; lastUpdate = System.currentTimeMillis() }
+                                        }.apply { x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch; bodyYaw = data.bodyYaw; lastUpdate = System.currentTimeMillis() }
                                     }
                                 }
                             }
@@ -3854,6 +3852,24 @@ class KapeLuz : JPanel() {
                         processInput()
                         processSingleInput()
                         updateWorld()
+                        
+                        // --- OBLICZANIE LOKALNEGO BODY YAW ---
+                        // Normalizacja yaw głowy do 0..2PI
+                        var normalizedYaw = yaw % (2 * Math.PI)
+                        if (normalizedYaw < 0) normalizedYaw += 2 * Math.PI
+
+                        // Obliczamy różnicę między głową a ciałem
+                        var diff = normalizedYaw - myBodyYaw
+                        while (diff < -Math.PI) diff += 2 * Math.PI
+                        while (diff > Math.PI) diff -= 2 * Math.PI
+
+                        val bodyLimit = Math.toRadians(80.0)
+                        if (diff > bodyLimit) myBodyYaw = normalizedYaw - bodyLimit
+                        else if (diff < -bodyLimit) myBodyYaw = normalizedYaw + bodyLimit
+                        
+                        // Normalizacja bodyYaw do 0..2PI (0..360)
+                        myBodyYaw = myBodyYaw % (2 * Math.PI)
+                        if (myBodyYaw < 0) myBodyYaw += 2 * Math.PI
 
                         gameTicks++
                         if (!gameFrozen) {
@@ -3886,7 +3902,7 @@ class KapeLuz : JPanel() {
                                 // ale prawdziwa identyfikacja odbywa się po kanale WebRTC.
                                 // FIX: Host wysyła swoje ID (1), Klient wysyła 0 (Host nadpisuje)
                                 val idToSend = if (isHost) 1.toByte() else 0.toByte()
-                                val packet = NetworkProtocol.encodePlayerPosition(idToSend, camX, camY, camZ, yaw, pitch)
+                                val packet = NetworkProtocol.encodePlayerPosition(idToSend, camX, camY, camZ, yaw, pitch, myBodyYaw)
 
                                 peerConnections.forEach { (_, rtc) ->
                                     rtc.sendData(packet)
@@ -3983,7 +3999,7 @@ class KapeLuz : JPanel() {
             // Budujemy listę wszystkich graczy (Host + Klienci)
             val allPlayers = HashMap<Byte, RemotePlayer>()
             // Dodaj Hosta (ID 1)
-            allPlayers[1] = RemotePlayer(camX, camY, camZ, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), localDimension)
+            allPlayers[1] = RemotePlayer(camX, camY, camZ, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), localDimension, false, myBodyYaw)
             // Dodaj Klientów
             allPlayers.putAll(remotePlayers)
 
@@ -4375,16 +4391,6 @@ class KapeLuz : JPanel() {
             if (player.dimension != localDimension) return@forEach
             if (myIdByte != null && id == myIdByte) return@forEach
 
-            // Body rotation logic
-            var diff = player.yaw - player.bodyYaw
-            // Normalize diff to -PI..PI
-            while (diff < -Math.PI) diff += 2 * Math.PI
-            while (diff > Math.PI) diff -= 2 * Math.PI
-
-            val limit = Math.toRadians(80.0)
-            if (diff > limit) player.bodyYaw = player.yaw - limit
-            else if (diff < -limit) player.bodyYaw = player.yaw + limit
-
             renderPlayerModel(player)
         }
 
@@ -4536,20 +4542,32 @@ class KapeLuz : JPanel() {
     }
 
     private fun renderPlayerModel(player: RemotePlayer) {
-        val s = cubeSize
-        val headSize = 0.5 * s
-        val thickness = headSize / 3.0
-        val torsoWidth = headSize
-        val torsoHeight = 0.75 * s
-        val legHeight = 0.75 * s
-        val armHeight = torsoHeight
+        val s = cubeSize / 16.0
+        val headSize = 8.0 * s
+        val torsoSize = Triple(8.0 * s, 12.0 * s, 4.0 * s)
+        val armSize = Triple(4.0 * s, 12.0 * s, 4.0 * s)
+        val legSize = Triple(4.0 * s, 12.0 * s, 4.0 * s)
 
-        val skinColor = Color(255, 200, 150) //in progress playermodel
+        val skinColor = Color(255, 200, 150)
         val shirtColor = Color(0, 0, 200)
         val pantsColor = Color(50, 0, 150)
 
-        val px = player.x; val py = player.y - (1.75 * cubeSize); val pz = player.z
-        val bYaw = -player.bodyYaw; val hYaw = -player.yaw; val hPitch = player.pitch
+        val px = player.x; val py = player.y - 24 * s; val pz = player.z
+        val bYaw = -player.bodyYaw; val hYaw = -player.yaw; val hPitch = -player.pitch
+
+        // Znajdź najjaśniejszy poziom światła dla gracza (głowa vs stopy)
+        val lightX = floor(player.x / cubeSize).toInt()
+        val headLightY = floor((player.y + 10.0) / cubeSize).toInt() // player.y to wysokość kamery
+        val feetLightY = floor((player.y - 3.0 + 10.0) / cubeSize).toInt() // Stopy są ok. 3 jednostki poniżej kamery
+        val lightZ = floor(player.z / cubeSize).toInt()
+
+        val headLightVal = getLight(lightX, headLightY, lightZ)
+        val feetLightVal = getLight(lightX, feetLightY, lightZ)
+
+        val headSky = (headLightVal shr 4) and 0xF; val headBlock = headLightVal and 0xF
+        val feetSky = (feetLightVal shr 4) and 0xF; val feetBlock = feetLightVal and 0xF
+
+        val finalLightVal = (maxOf(headSky, feetSky) shl 4) or maxOf(headBlock, feetBlock)
 
         fun processAndDrawTriangle(p1: Vector3d, p2: Vector3d, p3: Vector3d, color: Color, lightVal: Int) {
             val t1 = transform(p1); val t2 = transform(p2); val t3 = transform(p3)
@@ -4571,7 +4589,7 @@ class KapeLuz : JPanel() {
             }
         }
 
-        fun drawPart(cx: Double, cy: Double, cz: Double, sx: Double, sy: Double, sz: Double, color: Color, partYaw: Double, partPitch: Double = 0.0, pivotY: Double = 0.0) {
+        fun drawPart(cx: Double, cy: Double, cz: Double, sx: Double, sy: Double, sz: Double, color: Color, partYaw: Double, lightVal: Int, partPitch: Double = 0.0, pivotY: Double = cy) {
             val dx = sx / 2.0; val dy = sy / 2.0; val dz = sz / 2.0
             val corners = arrayOf(
                 Vector3d(cx - dx, cy - dy, cz - dz), Vector3d(cx + dx, cy - dy, cz - dz),
@@ -4595,29 +4613,30 @@ class KapeLuz : JPanel() {
                 intArrayOf(0, 1, 2, 3), intArrayOf(5, 4, 7, 6), intArrayOf(4, 0, 3, 7),
                 intArrayOf(1, 5, 6, 2), intArrayOf(3, 2, 6, 7), intArrayOf(4, 5, 1, 0)
             )
-            val lightX = floor(px / cubeSize).toInt()
-            val lightY = floor((py + cy + 10.0) / cubeSize).toInt()
-            val lightZ = floor(pz / cubeSize).toInt()
-            val lightVal = getLight(lightX, lightY, lightZ)
-
             for (face in faces) {
                 processAndDrawTriangle(corners[face[0]], corners[face[1]], corners[face[2]], color, lightVal)
                 processAndDrawTriangle(corners[face[0]], corners[face[2]], corners[face[3]], color, lightVal)
             }
         }
 
-        // Left Leg
-        drawPart(-thickness/2, legHeight/2, 0.0, thickness, legHeight, thickness, pantsColor, bYaw)
-        // Right Leg
-        drawPart(thickness/2, legHeight/2, 0.0, thickness, legHeight, thickness, pantsColor, bYaw)
-        // Torso
-        drawPart(0.0, legHeight + torsoHeight/2, 0.0, torsoWidth, torsoHeight, thickness, shirtColor, bYaw)
+        // Przesunięcia, aby wycentrować model wokół jego geometrycznego środka (X,Z)
+        // i umieścić jego stopy na poziomie Y=0 w jego lokalnej przestrzeni.
+        val modelCenterX = 6.0 * s
+        val modelCenterZ = 6.0 * s
+        val modelFeetOffset = 6.5 * s // Najniższy punkt nóg to -0.5 - 12/2 = -6.5. Przesuwamy o tyle w górę.
+
         // Head
-        drawPart(0.0, legHeight + torsoHeight + headSize/2, 0.0, headSize, headSize, headSize, skinColor, hYaw, hPitch, legHeight + torsoHeight)
-        // Left Arm
-        drawPart(-(torsoWidth/2 + thickness/2), legHeight + torsoHeight/2, 0.0, thickness, armHeight, thickness, skinColor, bYaw)
+        drawPart((6.0 * s) - modelCenterX, (21.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, headSize, headSize, headSize, skinColor, hYaw, finalLightVal, hPitch)
+        // Torso
+        drawPart((6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, torsoSize.first, torsoSize.second, torsoSize.third, shirtColor, bYaw, finalLightVal)
         // Right Arm
-        drawPart((torsoWidth/2 + thickness/2), legHeight + torsoHeight/2, 0.0, thickness, armHeight, thickness, skinColor, bYaw)
+        drawPart((12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, armSize.first, armSize.second, armSize.third, skinColor, bYaw, finalLightVal)
+        // Left Arm
+        drawPart((0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, armSize.first, armSize.second, armSize.third, skinColor, bYaw, finalLightVal)
+        // Right Leg
+        drawPart((8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, legSize.first, legSize.second, legSize.third, pantsColor, bYaw, finalLightVal)
+        // Left Leg
+        drawPart((4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, legSize.first, legSize.second, legSize.third, pantsColor, bYaw, finalLightVal)
     }
 
     private fun renderClouds() {

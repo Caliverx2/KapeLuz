@@ -116,10 +116,10 @@ object NetworkProtocol {
 
     // --- ENKODERY (Wysyłanie) ---
     /**
-     * Pakuje pozycję gracza do 16 bajtów (1 Header + 1 ID + 12 XYZ + 2 Rot).
+     * Pakuje pozycję gracza do 17 bajtów (1 Header + 1 ID + 12 XYZ + 2 Rot + 1 BodyYaw).
      */
-    fun encodePlayerPosition(playerId: Byte, x: Double, y: Double, z: Double, yaw: Double, pitch: Double): ByteBuffer {
-        val buffer = ByteBuffer.allocate(16)
+    fun encodePlayerPosition(playerId: Byte, x: Double, y: Double, z: Double, yaw: Double, pitch: Double, bodyYaw: Double): ByteBuffer {
+        val buffer = ByteBuffer.allocate(17)
         buffer.put(PACKET_PLAYER_POS)
         buffer.put(playerId)
 
@@ -132,9 +132,13 @@ object NetworkProtocol {
         val yawNorm = (yaw % (2 * PI))
         val yawByte = ((if (yawNorm < 0) yawNorm + 2 * PI else yawNorm) / (2 * PI) * 255).toInt().toByte()
         val pitchByte = (((pitch + (PI / 2)) / PI) * 255).toInt().coerceIn(0, 255).toByte()
+        
+        val bodyYawNorm = (bodyYaw % (2 * PI))
+        val bodyYawByte = ((if (bodyYawNorm < 0) bodyYawNorm + 2 * PI else bodyYawNorm) / (2 * PI) * 255).toInt().toByte()
 
         buffer.put(yawByte)
         buffer.put(pitchByte)
+        buffer.put(bodyYawByte)
 
         buffer.flip()
         return buffer
@@ -279,7 +283,7 @@ object NetworkProtocol {
         // Obliczamy rozmiar bufora dynamicznie
         var size = 2 // Header + Count
         players.forEach { (_, p) ->
-            size += 15 // ID + Pos + Rot
+            size += 16 // ID + Pos + Rot + BodyYaw
             size += 4 + p.dimension.toByteArray(Charsets.UTF_8).size // Length + String bytes
         }
 
@@ -296,9 +300,13 @@ object NetworkProtocol {
             val yawNorm = (p.yaw % (2 * PI))
             val yawByte = ((if (yawNorm < 0) yawNorm + 2 * PI else yawNorm) / (2 * PI) * 255).toInt().toByte()
             val pitchByte = (((p.pitch + (PI / 2)) / PI) * 255).toInt().coerceIn(0, 255).toByte()
+            
+            val bodyYawNorm = (p.bodyYaw % (2 * PI))
+            val bodyYawByte = ((if (bodyYawNorm < 0) bodyYawNorm + 2 * PI else bodyYawNorm) / (2 * PI) * 255).toInt().toByte()
 
             buffer.put(yawByte)
             buffer.put(pitchByte)
+            buffer.put(bodyYawByte)
 
             val dimBytes = p.dimension.toByteArray(Charsets.UTF_8)
             buffer.putInt(dimBytes.size)
@@ -429,7 +437,7 @@ object NetworkProtocol {
 
     // --- DEKODERY (Odbieranie) ---
 
-    data class DecodedPosition(val playerId: Byte, val x: Double, val y: Double, val z: Double, val yaw: Double, val pitch: Double)
+    data class DecodedPosition(val playerId: Byte, val x: Double, val y: Double, val z: Double, val yaw: Double, val pitch: Double, val bodyYaw: Double)
     data class DecodedDimension(val playerId: Byte, val dimension: String)
     data class DecodedBlock(val x: Int, val y: Int, val z: Int, val color: Int, val metadata: Byte)
     data class DecodedChunk(val cx: Int, val cz: Int, val blocks: IntArray, val metadata: ByteArray)
@@ -451,11 +459,13 @@ object NetworkProtocol {
 
         val yawByte = buffer.get().toUByte().toInt()
         val pitchByte = buffer.get().toUByte().toInt()
+        val bodyYawByte = buffer.get().toUByte().toInt()
 
         val yaw = (yawByte / 255.0) * (2 * PI)
         val pitch = (pitchByte / 255.0) * PI - (PI / 2)
+        val bodyYaw = (bodyYawByte / 255.0) * (2 * PI)
 
-        return DecodedPosition(pid, x, y, z, yaw, pitch)
+        return DecodedPosition(pid, x, y, z, yaw, pitch, bodyYaw)
     }
 
     fun decodePlayerDimension(buffer: ByteBuffer): DecodedDimension {
@@ -561,16 +571,18 @@ object NetworkProtocol {
             val z = buffer.float.toDouble()
             val yawByte = buffer.get().toUByte().toInt()
             val pitchByte = buffer.get().toUByte().toInt()
+            val bodyYawByte = buffer.get().toUByte().toInt()
 
             val yaw = (yawByte / 255.0) * (2 * PI)
             val pitch = (pitchByte / 255.0) * PI - (PI / 2)
+            val bodyYaw = (bodyYawByte / 255.0) * (2 * PI)
 
             val dimLen = buffer.int
             val dimBytes = ByteArray(dimLen)
             buffer.get(dimBytes)
             val dimension = String(dimBytes, Charsets.UTF_8)
 
-            map[id] = RemotePlayer(x, y, z, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), dimension)
+            map[id] = RemotePlayer(x, y, z, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), dimension, false, bodyYaw)
         }
         return map
     }

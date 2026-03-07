@@ -5954,6 +5954,9 @@ class KapeLuz : JPanel() {
             pitch -= inputManager.mouseDeltaY * inputManager.sensitivity
         }
 
+        // Ograniczenie pitch do +/- 90 stopni (PI/2 radianów), aby uniknąć "przekręcenia" kamery.
+        pitch = pitch.coerceIn(-Math.PI / 2.0 + 0.001, Math.PI / 2.0 - 0.001)
+
         if (inputManager.isKeyDown(KeyEvent.VK_TAB)) {
             if (isMultiplayer) showPlayerList = true
         } else showPlayerList = false
@@ -5990,37 +5993,75 @@ class KapeLuz : JPanel() {
             // --- Tryb chodzenia (Grawitacja) ---
 
             // 1. Logika kucania (zapobieganie spadaniu z krawędzi)
-            if (isCrouching && isOnGround) {
+            if (isCrouching && isOnGround && (dx != 0.0 || dz != 0.0)) {
                 val groundCheckY = camY - 0.1 // Sprawdzamy kolizję nieco poniżej stóp
 
-                // Sprawdzenie osi X
-                if (dx != 0.0 && !checkCollision(camX + dx, groundCheckY, camZ)) {
-                    // Jeśli pełny ruch powoduje upadek, próbujemy podejść do krawędzi iteracyjnie
-                    var safeDx = 0.0
-                    val sign = sign(dx)
-                    val step = abs(dx) / 10.0
-                    for (i in 1..10) {
-                        if (checkCollision(camX + safeDx + sign * step, groundCheckY, camZ)) {
-                            safeDx += sign * step
-                        } else {
-                            break
+                // --- NOWA LOGIKA ŚLIZGANIA SIĘ ---
+                // Ta logika przywraca ślizganie się po krawędziach, jednocześnie zapobiegając spadaniu na rogach.
+
+                // 1. Oblicz bezpieczny ruch w osi X, tak jakbyśmy poruszali się tylko w niej.
+                var safeDx = 0.0
+                if (dx != 0.0) {
+                    if (checkSafeGround(camX + dx, groundCheckY, camZ)) {
+                        safeDx = dx
+                    } else {
+                        // Jeśli pełny ruch jest niebezpieczny, podchodzimy do krawędzi.
+                        val sign = sign(dx)
+                        val step = abs(dx) / 10.0
+                        for (i in 1..10) {
+                            val nextStep = safeDx + sign * step
+                            if (checkSafeGround(camX + nextStep, groundCheckY, camZ)) {
+                                safeDx = nextStep
+                            } else {
+                                break
+                            }
                         }
                     }
-                    dx = safeDx
                 }
 
-                // Sprawdzenie osi Z (uwzględniając ewentualnie zmieniony dx)
-                if (dz != 0.0 && !checkCollision(camX + dx, groundCheckY, camZ + dz)) {
-                    var safeDz = 0.0
-                    val sign = sign(dz)
-                    val step = abs(dz) / 10.0
-                    for (i in 1..10) {
-                        if (checkCollision(camX + dx, groundCheckY, camZ + safeDz + sign * step)) {
-                            safeDz += sign * step
-                        } else {
-                            break
+                // 2. Oblicz bezpieczny ruch w osi Z, tak jakbyśmy poruszali się tylko w niej.
+                var safeDz = 0.0
+                if (dz != 0.0) {
+                    if (checkSafeGround(camX, groundCheckY, camZ + dz)) {
+                        safeDz = dz
+                    } else {
+                        // Jeśli pełny ruch jest niebezpieczny, podchodzimy do krawędzi.
+                        val sign = sign(dz)
+                        val step = abs(dz) / 10.0
+                        for (i in 1..10) {
+                            val nextStep = safeDz + sign * step
+                            if (checkSafeGround(camX, groundCheckY, camZ + nextStep)) {
+                                safeDz = nextStep
+                            } else {
+                                break
+                            }
                         }
                     }
+                }
+
+                // 3. Sprawdź, czy połączony ruch (safeDx, safeDz) jest bezpieczny.
+                // To jest kluczowy krok, który zapobiega "ścinaniu rogów" i wpadaniu w dziury po przekątnej.
+                if (!checkSafeGround(camX + safeDx, groundCheckY, camZ + safeDz)) {
+                    // Połączony ruch jest niebezpieczny (np. na rogu dziury).
+                    // Decydujemy, którą oś poświęcić, aby się nie zablokować.
+                    // Zasadniczo próbujemy zachować "ważniejszy" (większy) komponent ruchu.
+                    if (abs(dx) > abs(dz)) {
+                        // Ruch w X był ważniejszy, więc poświęcamy Z.
+                        dz = 0.0
+                        dx = safeDx // Używamy już obliczonego bezpiecznego ruchu w X.
+                    } else if (abs(dz) > abs(dx)) {
+                        // Ruch w Z był ważniejszy, poświęcamy X.
+                        dx = 0.0
+                        dz = safeDz // Używamy już obliczonego bezpiecznego ruchu w Z.
+                    } else {
+                        // Ruch po przekątnej jest idealnie 45 stopni. Zatrzymanie jest najbezpieczniejsze.
+                        dx = 0.0
+                        dz = 0.0
+                    }
+                } else {
+                    // Połączony ruch jest bezpieczny. Aplikujemy obliczone bezpieczne wartości,
+                    // co pozwala na płynne ślizganie się wzdłuż krawędzi.
+                    dx = safeDx
                     dz = safeDz
                 }
             }
@@ -6158,6 +6199,32 @@ class KapeLuz : JPanel() {
         val maxZ = floor((camZ + radiusCollision) / cubeSize + 0.5).toInt()
 
         return bx in minX..maxX && by in minY..maxY && bz in minZ..maxZ
+    }
+
+    private fun checkSafeGround(x: Double, y: Double, z: Double): Boolean {
+        val minX = floor((x - radiusCollision) / cubeSize + 0.5).toInt()
+        val maxX = floor((x + radiusCollision) / cubeSize + 0.5).toInt()
+
+        val feetY = y - cubeSize - playerHeight/2
+        val minY = floor((feetY + 10.0) / cubeSize + 0.5).toInt()
+        // FIX: Sprawdzamy tylko warstwę stóp (minY), ignorując głowę.
+        // Dzięki temu blok nad dziurą nie zostanie uznany za bezpieczne podłoże.
+        val maxY = minY
+
+        val minZ = floor((z - radiusCollision) / cubeSize + 0.5).toInt()
+        val maxZ = floor((z + radiusCollision) / cubeSize + 0.5).toInt()
+
+        for (bx in minX..maxX) {
+            for (by in minY..maxY) {
+                for (bz in minZ..maxZ) {
+                    val id = getRawBlock(bx, by, bz)
+                    if (id != 0 && !fluidBlocks.contains(id)) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     private fun checkCollision(x: Double, y: Double, z: Double): Boolean {

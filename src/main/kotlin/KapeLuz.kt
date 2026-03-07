@@ -4265,12 +4265,14 @@ class KapeLuz : JPanel() {
                                         // To oszczędza tworzenie list i obiektów dla 99% trójkątów
                                         if (z1 >= nearPlaneZ && z2 >= nearPlaneZ && z3 >= nearPlaneZ) {
                                             // Inline Project
-                                            val sx1 = (x1 * focalLength) / z1 + halfCols
-                                            val sy1 = -(y1 * focalLength) / z1 + halfRows
-                                            val sx2 = (x2 * focalLength) / z2 + halfCols
-                                            val sy2 = -(y2 * focalLength) / z2 + halfRows
-                                            val sx3 = (x3 * focalLength) / z3 + halfCols
-                                            val sy3 = -(y3 * focalLength) / z3 + halfRows
+                                            // Sub-pixel Snapping (1/16 pixel) - kluczowe, aby wierzchołki sąsiadów były identyczne
+                                            val precision = 16.0
+                                            val sx1 = floor(((x1 * focalLength) / z1 + halfCols) * precision + 0.5) / precision
+                                            val sy1 = floor((-(y1 * focalLength) / z1 + halfRows) * precision + 0.5) / precision
+                                            val sx2 = floor(((x2 * focalLength) / z2 + halfCols) * precision + 0.5) / precision
+                                            val sy2 = floor((-(y2 * focalLength) / z2 + halfRows) * precision + 0.5) / precision
+                                            val sx3 = floor(((x3 * focalLength) / z3 + halfCols) * precision + 0.5) / precision
+                                            val sy3 = floor((-(y3 * focalLength) / z3 + halfRows) * precision + 0.5) / precision
 
                                             // Lighting Calc
                                             val packedLight = tri.lightLevel
@@ -5095,8 +5097,13 @@ class KapeLuz : JPanel() {
         val py = -(v.y * localLenght) / zSafe
 
         // Przesunięcie na środek ekranu (gridMapy)
-        val screenX = px + (baseCols / 2)
-        val screenY = py + (baseRows / 2)
+        var screenX = px + (baseCols / 2)
+        var screenY = py + (baseRows / 2)
+
+        // Sub-pixel Snapping (1/16 pixel) - stabilizuje krawędzie
+        val precision = 16.0
+        screenX = floor(screenX * precision + 0.5) / precision
+        screenY = floor(screenY * precision + 0.5) / precision
 
         return Vector3d(screenX, screenY, v.z)
     }
@@ -5422,8 +5429,11 @@ class KapeLuz : JPanel() {
             var v = rowV; var w = rowW
             var pixelIndex = y * imageWidth + minX
             for (x in minX..maxX) {
-                // Usunięto epsilon i coerceIn dla wydajności
-                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
+                // Zwiększono epsilon do 0.0005. Poprzednia wartość (1e-5) była zbyt mała i powodowała powstawanie
+                // "szwów" (dziur) między blokami, przez które prześwitywało tło.
+                // Stała wartość barycentryczna naturalnie daje "grubszy" margines dla obiektów blisko kamery.
+                val epsilon = 0.0005
+                if (v >= -epsilon && w >= -epsilon && (v + w) <= 1.0 + epsilon) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip
@@ -5497,6 +5507,12 @@ class KapeLuz : JPanel() {
         val dwdx = wNextX - wStart
         val dvdy = vNextY - vStart
         val dwdy = wNextY - wStart
+        
+        // --- RASTERYZACJA KONSERWATYWNA ---
+        val v_offset_x = 0.5 * dvdx
+        val w_offset_x = 0.5 * dwdx
+        val v_offset_y = 0.5 * dvdy
+        val w_offset_y = 0.5 * dwdy
 
         // Zmienne robocze dla wierszy
         var rowV = vStart
@@ -5504,15 +5520,23 @@ class KapeLuz : JPanel() {
 
         for (y in minY..maxY) {
             var v = rowV; var w = rowW
-
-            // Indeks w tablicy pikseli (optymalizacja dostępu do tablicy)
             var pixelIndex = y * imageWidth + minX
 
             for (x in minX..maxX) {
-                // Dodajemy mały margines błędu (epsilon), aby uniknąć "dziur" na łączeniach trójkątów
-                // u = 1 - v - w, więc warunek u >= 0 to v + w <= 1
-                if (v >= -0.001 && w >= -0.001 && (v + w) <= 1.001) {
-                    val u = 1.0 - v - w
+                // Sprawdzamy 4 rogi piksela, aby zagwarantować wypełnienie każdej dziury.
+                val v_tl = v - v_offset_x - v_offset_y; val w_tl = w - w_offset_x - w_offset_y
+                val v_tr = v + v_offset_x - v_offset_y; val w_tr = w + w_offset_x - w_offset_y
+                val v_bl = v - v_offset_x + v_offset_y; val w_bl = w - w_offset_x + w_offset_y
+                val v_br = v + v_offset_x + v_offset_y; val w_br = w + w_offset_x + w_offset_y
+
+                val c1_in = v_tl >= 0.0 && w_tl >= 0.0 && (v_tl + w_tl) <= 1.0
+                val c2_in = v_tr >= 0.0 && w_tr >= 0.0 && (v_tr + w_tr) <= 1.0
+                val c3_in = v_bl >= 0.0 && w_bl >= 0.0 && (v_bl + w_bl) <= 1.0
+                val c4_in = v_br >= 0.0 && w_br >= 0.0 && (v_br + w_br) <= 1.0
+
+                if (c1_in || c2_in || c3_in || c4_in) {
+                    // Używamy środka piksela do interpolacji
+                    val u = (1.0 - v - w).coerceIn(0.0, 1.0)
 
                     // FIX: Perspective Correct Interpolation
                     // Interpolujemy odwrotność Z (1/z), a nie samo Z

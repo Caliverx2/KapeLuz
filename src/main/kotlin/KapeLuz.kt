@@ -64,8 +64,8 @@ abstract class Entity(
 }
 
 data class ItemEntity(val itemStack: ItemStack, private val initialX: Double, private val initialY: Double, private val initialZ: Double, var pickupDelay: Int = 0) : Entity(initialX, initialY, initialZ, scale = 0.25) {
-    override val hitboxMin: Vector3d = Vector3d(-1.25, -1.25, -1.25)
-    override val hitboxMax: Vector3d = Vector3d(1.25, 1.25, 1.25)
+    override val hitboxMin: Vector3d = Vector3d(-1.15, -1.15, -1.15)
+    override val hitboxMax: Vector3d = Vector3d(1.15, 1.15, 1.15)
     override var shadowRadius: Double = 0.3
     var age = 0L
     var isBeingPickedUp = false
@@ -1242,10 +1242,10 @@ class KapeLuz : JPanel() {
                                     val senderPlayer = remotePlayers[senderNetId]
                                     if (senderPlayer != null) {
                                         // Host spawnuje przedmiot w miejscu gracza
-                                        val spawnX = senderPlayer.x + sin(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.8
-                                        val spawnY = senderPlayer.y + sin(senderPlayer.pitch) * 0.5 // Uproszczone viewY (bez kucania Hosta)
-                                        val spawnZ = senderPlayer.z + cos(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.8
-
+                                        // FIX: Spawn at player's camera position to avoid spawning inside walls.
+                                        val spawnX = senderPlayer.x
+                                        val spawnY = senderPlayer.y // RemotePlayer.y is camera Y, equivalent to viewY
+                                        val spawnZ = senderPlayer.z
                                         val stack = ItemStack(req.color, req.count)
                                         val entity = ItemEntity(stack, spawnX, spawnY, spawnZ, pickupDelay = 40)
                                         entity.velX = sin(senderPlayer.yaw) * cos(senderPlayer.pitch) * 0.4
@@ -1260,7 +1260,7 @@ class KapeLuz : JPanel() {
                                 // Klient otrzymuje przedmiot od Hosta (np. po podniesieniu)
                                 val data = NetworkProtocol.decodeAddItem(bufferCopy)
                                 val remaining = addItem(data.color, data.count)
-                                
+
                                 // Jeśli ekwipunek pełny, wyrzucamy resztę z powrotem (Host zespawnuje item z delayem)
                                 if (remaining > 0) {
                                     val packet = NetworkProtocol.encodeDropItemRequest(data.color, remaining)
@@ -1446,7 +1446,7 @@ class KapeLuz : JPanel() {
                                                 chunk = chunkGenerator.generate(req.cx, req.cz) // Generator jest generyczny
                                                 chunkIO.saveChunk(chunk, playerDim)
                                             }
-                                            
+
                                             // FIX: Dodajemy do pamięci Hosta tylko jeśli wymiary się zgadzają
                                             if (playerDim == localDimension) {
                                                 chunks.putIfAbsent(p, chunk)
@@ -2236,9 +2236,10 @@ class KapeLuz : JPanel() {
 
             // Calculate spawn position and velocity
             // Spawn from the camera, not inside the player's head
-            val spawnX = camX + sin(yaw) * cos(pitch) * 0.8
-            val spawnY = viewY + sin(pitch) * 0.5
-            val spawnZ = camZ + cos(yaw) * cos(pitch) * 0.8
+            // FIX: Spawn at camera position to avoid spawning inside walls when player is close to them.
+            val spawnX = camX
+            val spawnY = viewY
+            val spawnZ = camZ
 
             val itemEntity = ItemEntity(droppedItemStack, spawnX, spawnY, spawnZ, pickupDelay = 40) // 40 ticków = 2 sekundy
 
@@ -2432,9 +2433,9 @@ class KapeLuz : JPanel() {
                     // Zamiast dodawać od razu, tworzymy ItemEntity
                     val itemStack = ItemStack(rawBlock, 1)
                     // Pozycja środka bloku: (x + 0.5) * cubeSize, Y przesunięte o -10.0
-                        val spawnX = (x) * cubeSize
-                        val spawnY = (y) * cubeSize - 10.0
-                        val spawnZ = (z) * cubeSize
+                    val spawnX = (x) * cubeSize
+                    val spawnY = (y) * cubeSize - 10.0
+                    val spawnZ = (z) * cubeSize
                     // Timeout 10 ticków (0.5s), brak prędkości początkowej (tylko grawitacja w updateEntities)
                     val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
                     itemEntity.velX = (Math.random() - 0.5) * 0.2
@@ -3203,36 +3204,7 @@ class KapeLuz : JPanel() {
                 if (abs(entity.velX) < 0.001) entity.velX = 0.0
                 if (abs(entity.velZ) < 0.001) entity.velZ = 0.0
 
-                // --- Kolizje i ruch ---
-                // Osobne osie, aby umożliwić ślizganie się po ścianach
-                val nextX = entity.x + entity.velX
-                val nextY = entity.y + entity.velY
-                val nextZ = entity.z + entity.velZ
-
-                // Oś Y
-                if (checkEntityCollision(entity.x, nextY, entity.z, entity)) {
-                    if (entity.velY < 0) { // Uderzenie w podłogę
-                        entity.onGround = true
-                    }
-                    entity.velY = 0.0 // Zatrzymanie
-                } else {
-                    entity.y = nextY
-                    entity.onGround = false
-                }
-
-                // Oś X
-                if (checkEntityCollision(nextX, entity.y, entity.z, entity)) {
-                    entity.velX = 0.0
-                } else {
-                    entity.x = nextX
-                }
-
-                // Oś Z
-                if (checkEntityCollision(entity.x, entity.y, nextZ, entity)) {
-                    entity.velZ = 0.0
-                } else {
-                    entity.z = nextZ
-                }
+                moveEntityWithCollision(entity, entity.velX, entity.velY, entity.velZ)
 
                 // --- MULTIPLAYER SYNC (HOST) ---
                 if (isHost && entity.age % 3 == 0L) { // Wysyłamy co 3 ticki (10 razy/sek)
@@ -3247,6 +3219,81 @@ class KapeLuz : JPanel() {
                 }
             }
         }
+    }
+
+    private fun moveEntityWithCollision(entity: Entity, dx: Double, dy: Double, dz: Double) {
+        var newX = entity.x
+        var newY = entity.y
+        var newZ = entity.z
+
+        // --- Move on Y axis ---
+        if (dy != 0.0) {
+            if (checkEntityCollision(newX, newY + dy, newZ, entity)) {
+                var tempDy = 0.0
+                val sign = dy.sign
+                val numSteps = 10
+                val step = abs(dy) / numSteps
+                for (i in 1..numSteps) {
+                    if (!checkEntityCollision(newX, newY + tempDy + (sign * step), newZ, entity)) {
+                        tempDy += sign * step
+                    } else {
+                        break
+                    }
+                }
+                newY += tempDy
+                if (entity.velY < 0) entity.onGround = true
+                entity.velY = 0.0
+            } else {
+                newY += dy
+                entity.onGround = false
+            }
+        }
+
+        // --- Move on X axis ---
+        if (dx != 0.0) {
+            if (checkEntityCollision(newX + dx, newY, newZ, entity)) {
+                var tempDx = 0.0
+                val sign = dx.sign
+                val numSteps = 10
+                val step = abs(dx) / numSteps
+                for (i in 1..numSteps) {
+                    if (!checkEntityCollision(newX + tempDx + (sign * step), newY, newZ, entity)) {
+                        tempDx += sign * step
+                    } else {
+                        break
+                    }
+                }
+                newX += tempDx
+                entity.velX = 0.0 // Stop horizontal movement on collision
+            } else {
+                newX += dx
+            }
+        }
+
+        // --- Move on Z axis ---
+        if (dz != 0.0) {
+            if (checkEntityCollision(newX, newY, newZ + dz, entity)) {
+                var tempDz = 0.0
+                val sign = dz.sign
+                val numSteps = 10
+                val step = abs(dz) / numSteps
+                for (i in 1..numSteps) {
+                    if (!checkEntityCollision(newX, newY, newZ + tempDz + (sign * step), entity)) {
+                        tempDz += sign * step
+                    } else {
+                        break
+                    }
+                }
+                newZ += tempDz
+                entity.velZ = 0.0 // Stop horizontal movement on collision
+            } else {
+                newZ += dz
+            }
+        }
+
+        entity.x = newX
+        entity.y = newY
+        entity.z = newZ
     }
 
     private fun isChunkLoaded(entity: Entity): Boolean {
@@ -3798,7 +3845,7 @@ class KapeLuz : JPanel() {
                         // FIX: Auto-save w tle, aby nie blokować wątku sieciowego i gry
                         chunkExecutor.submit {
                             var savedCount = 0
-                            // Tworzymy kopię wartości, aby uniknąć ConcurrentModificationException, 
+                            // Tworzymy kopię wartości, aby uniknąć ConcurrentModificationException,
                             // choć ConcurrentHashMap jest bezpieczna, iteracja po niej może być kosztowna.
                             chunks.values.forEach { chunk ->
                                 if (chunk.modified) {
@@ -3852,7 +3899,7 @@ class KapeLuz : JPanel() {
                         processInput()
                         processSingleInput()
                         updateWorld()
-                        
+
                         // --- OBLICZANIE LOKALNEGO BODY YAW ---
                         // Normalizacja yaw głowy do 0..2PI
                         var normalizedYaw = yaw % (2 * Math.PI)
@@ -3866,7 +3913,7 @@ class KapeLuz : JPanel() {
                         val bodyLimit = Math.toRadians(80.0)
                         if (diff > bodyLimit) myBodyYaw = normalizedYaw - bodyLimit
                         else if (diff < -bodyLimit) myBodyYaw = normalizedYaw + bodyLimit
-                        
+
                         // Normalizacja bodyYaw do 0..2PI (0..360)
                         myBodyYaw = myBodyYaw % (2 * Math.PI)
                         if (myBodyYaw < 0) myBodyYaw += 2 * Math.PI
@@ -3898,7 +3945,7 @@ class KapeLuz : JPanel() {
                         if (gameTicks % 2 == 0L && !peerConnections.isEmpty()) {
                             try {
                                 // Używamy nowego protokołu (15 bajtów zamiast 24+)
-                                // ID gracza (Byte) jest teraz używane tylko lokalnie w pakiecie, 
+                                // ID gracza (Byte) jest teraz używane tylko lokalnie w pakiecie,
                                 // ale prawdziwa identyfikacja odbywa się po kanale WebRTC.
                                 // FIX: Host wysyła swoje ID (1), Klient wysyła 0 (Host nadpisuje)
                                 val idToSend = if (isHost) 1.toByte() else 0.toByte()
@@ -4265,14 +4312,12 @@ class KapeLuz : JPanel() {
                                         // To oszczędza tworzenie list i obiektów dla 99% trójkątów
                                         if (z1 >= nearPlaneZ && z2 >= nearPlaneZ && z3 >= nearPlaneZ) {
                                             // Inline Project
-                                            // Sub-pixel Snapping (1/16 pixel) - kluczowe, aby wierzchołki sąsiadów były identyczne
-                                            val precision = 16.0
-                                            val sx1 = floor(((x1 * focalLength) / z1 + halfCols) * precision + 0.5) / precision
-                                            val sy1 = floor((-(y1 * focalLength) / z1 + halfRows) * precision + 0.5) / precision
-                                            val sx2 = floor(((x2 * focalLength) / z2 + halfCols) * precision + 0.5) / precision
-                                            val sy2 = floor((-(y2 * focalLength) / z2 + halfRows) * precision + 0.5) / precision
-                                            val sx3 = floor(((x3 * focalLength) / z3 + halfCols) * precision + 0.5) / precision
-                                            val sy3 = floor((-(y3 * focalLength) / z3 + halfRows) * precision + 0.5) / precision
+                                            val sx1 = (x1 * focalLength) / z1 + halfCols
+                                            val sy1 = -(y1 * focalLength) / z1 + halfRows
+                                            val sx2 = (x2 * focalLength) / z2 + halfCols
+                                            val sy2 = -(y2 * focalLength) / z2 + halfRows
+                                            val sx3 = (x3 * focalLength) / z3 + halfCols
+                                            val sy3 = -(y3 * focalLength) / z3 + halfRows
 
                                             // Lighting Calc
                                             val packedLight = tri.lightLevel
@@ -5097,13 +5142,8 @@ class KapeLuz : JPanel() {
         val py = -(v.y * localLenght) / zSafe
 
         // Przesunięcie na środek ekranu (gridMapy)
-        var screenX = px + (baseCols / 2)
-        var screenY = py + (baseRows / 2)
-
-        // Sub-pixel Snapping (1/16 pixel) - stabilizuje krawędzie
-        val precision = 16.0
-        screenX = floor(screenX * precision + 0.5) / precision
-        screenY = floor(screenY * precision + 0.5) / precision
+        val screenX = px + (baseCols / 2)
+        val screenY = py + (baseRows / 2)
 
         return Vector3d(screenX, screenY, v.z)
     }
@@ -5429,11 +5469,8 @@ class KapeLuz : JPanel() {
             var v = rowV; var w = rowW
             var pixelIndex = y * imageWidth + minX
             for (x in minX..maxX) {
-                // Zwiększono epsilon do 0.0005. Poprzednia wartość (1e-5) była zbyt mała i powodowała powstawanie
-                // "szwów" (dziur) między blokami, przez które prześwitywało tło.
-                // Stała wartość barycentryczna naturalnie daje "grubszy" margines dla obiektów blisko kamery.
-                val epsilon = 0.0005
-                if (v >= -epsilon && w >= -epsilon && (v + w) <= 1.0 + epsilon) {
+                // Usunięto epsilon i coerceIn dla wydajności
+                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip
@@ -5507,12 +5544,6 @@ class KapeLuz : JPanel() {
         val dwdx = wNextX - wStart
         val dvdy = vNextY - vStart
         val dwdy = wNextY - wStart
-        
-        // --- RASTERYZACJA KONSERWATYWNA ---
-        val v_offset_x = 0.5 * dvdx
-        val w_offset_x = 0.5 * dwdx
-        val v_offset_y = 0.5 * dvdy
-        val w_offset_y = 0.5 * dwdy
 
         // Zmienne robocze dla wierszy
         var rowV = vStart
@@ -5520,23 +5551,15 @@ class KapeLuz : JPanel() {
 
         for (y in minY..maxY) {
             var v = rowV; var w = rowW
+
+            // Indeks w tablicy pikseli (optymalizacja dostępu do tablicy)
             var pixelIndex = y * imageWidth + minX
 
             for (x in minX..maxX) {
-                // Sprawdzamy 4 rogi piksela, aby zagwarantować wypełnienie każdej dziury.
-                val v_tl = v - v_offset_x - v_offset_y; val w_tl = w - w_offset_x - w_offset_y
-                val v_tr = v + v_offset_x - v_offset_y; val w_tr = w + w_offset_x - w_offset_y
-                val v_bl = v - v_offset_x + v_offset_y; val w_bl = w - w_offset_x + w_offset_y
-                val v_br = v + v_offset_x + v_offset_y; val w_br = w + w_offset_x + w_offset_y
-
-                val c1_in = v_tl >= 0.0 && w_tl >= 0.0 && (v_tl + w_tl) <= 1.0
-                val c2_in = v_tr >= 0.0 && w_tr >= 0.0 && (v_tr + w_tr) <= 1.0
-                val c3_in = v_bl >= 0.0 && w_bl >= 0.0 && (v_bl + w_bl) <= 1.0
-                val c4_in = v_br >= 0.0 && w_br >= 0.0 && (v_br + w_br) <= 1.0
-
-                if (c1_in || c2_in || c3_in || c4_in) {
-                    // Używamy środka piksela do interpolacji
-                    val u = (1.0 - v - w).coerceIn(0.0, 1.0)
+                // Dodajemy mały margines błędu (epsilon), aby uniknąć "dziur" na łączeniach trójkątów
+                // u = 1 - v - w, więc warunek u >= 0 to v + w <= 1
+                if (v >= -0.001 && w >= -0.001 && (v + w) <= 1.001) {
+                    val u = 1.0 - v - w
 
                     // FIX: Perspective Correct Interpolation
                     // Interpolujemy odwrotność Z (1/z), a nie samo Z

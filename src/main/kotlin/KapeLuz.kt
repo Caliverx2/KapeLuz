@@ -1323,11 +1323,11 @@ class KapeLuz : JPanel() {
                                             if (oldBlock != 0) {
                                                 val itemStack = ItemStack(oldBlock, 1)
                                                 val spawnX = data.x * cubeSize
-                                                val spawnY = data.y * cubeSize - 10.0
+                                                val spawnY = data.y * cubeSize - 10.0 + 0.25
                                                 val spawnZ = data.z * cubeSize
                                                 val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
                                                 itemEntity.velX = (Math.random() - 0.5) * 0.2
-                                                itemEntity.velY = (Math.random() - 0.5) * 0.2
+                                                itemEntity.velY = 0.2 // Give it a slight upward pop
                                                 itemEntity.velZ = (Math.random() - 0.5) * 0.2
                                                 // Spawnujemy w wymiarze gracza, który zniszczył blok
                                                 spawnEntity(itemEntity, senderDim)
@@ -1354,11 +1354,11 @@ class KapeLuz : JPanel() {
                                                     if (oldBlock != 0) {
                                                         val itemStack = ItemStack(oldBlock, 1)
                                                         val spawnX = data.x * cubeSize
-                                                        val spawnY = data.y * cubeSize - 10.0
+                                                        val spawnY = data.y * cubeSize - 10.0 + 0.25
                                                         val spawnZ = data.z * cubeSize
                                                         val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
                                                         itemEntity.velX = (Math.random() - 0.5) * 0.2
-                                                        itemEntity.velY = (Math.random() - 0.5) * 0.2
+                                                        itemEntity.velY = 0.2 // Give it a slight upward pop
                                                         itemEntity.velZ = (Math.random() - 0.5) * 0.2
                                                         spawnEntity(itemEntity, senderDim)
                                                     }
@@ -2434,12 +2434,12 @@ class KapeLuz : JPanel() {
                     val itemStack = ItemStack(rawBlock, 1)
                     // Pozycja środka bloku: (x + 0.5) * cubeSize, Y przesunięte o -10.0
                     val spawnX = (x) * cubeSize
-                    val spawnY = (y) * cubeSize - 10.0
+                    val spawnY = (y) * cubeSize - 10.0 + 0.25
                     val spawnZ = (z) * cubeSize
                     // Timeout 10 ticków (0.5s), brak prędkości początkowej (tylko grawitacja w updateEntities)
                     val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
                     itemEntity.velX = (Math.random() - 0.5) * 0.2
-                    itemEntity.velY = (Math.random() - 0.5) * 0.2
+                    itemEntity.velY = 0.2
                     itemEntity.velZ = (Math.random() - 0.5) * 0.2
                     // W Multiplayerze niszczenie bloku jest obsługiwane przez Hosta (który wyśle spawn itemu),
                     // ale tutaj mamy logikę lokalną.
@@ -2558,11 +2558,11 @@ class KapeLuz : JPanel() {
                     if (rawBlock != 0) {
                         val itemStack = ItemStack(rawBlock, 1)
                         val spawnX = (x) * cubeSize
-                        val spawnY = (y) * cubeSize - 10.0
+                        val spawnY = (y) * cubeSize - 10.0 + 0.25
                         val spawnZ = (z) * cubeSize
                         val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
                         itemEntity.velX = (Math.random() - 0.5) * 0.2
-                        itemEntity.velY = (Math.random() - 0.5) * 0.2
+                        itemEntity.velY = 0.2 // Give it a slight upward pop
                         itemEntity.velZ = (Math.random() - 0.5) * 0.2
                         if (!isMultiplayerClient) {
                             spawnEntity(itemEntity, localDimension)
@@ -3186,6 +3186,10 @@ class KapeLuz : JPanel() {
                 entity.yaw += 0.05
 
                 // --- Fizyka ---
+                if (entity.onGround && !checkEntityCollision(entity.x, entity.y - 0.05, entity.z, entity)) {
+                    entity.onGround = false
+                }
+
                 if (!entity.onGround) {
                     entity.velY -= gravity * 0.2 // Słabsza grawitacja dla przedmiotów
                 }

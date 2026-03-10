@@ -1316,39 +1316,39 @@ class KapeLuz : JPanel() {
                                     val cz = if (data.z >= 0) data.z / 16 else (data.z + 1) / 16 - 1
                                     val p = Point(cx, cz)
 
-                                    if (senderDim == localDimension && chunks.containsKey(p)) {
-                                        // FIX: Host sprawdza czy zniszczono blok i spawnuje drop
+                                    // Jeśli chunk jest aktualnie załadowany w pamięci Hosta, modyfikujemy go bezpośrednio.
+                                    // To jest optymalna, szybka ścieżka dla zmian w pobliżu Hosta.
+                                    if (chunks.containsKey(p) && senderDim == localDimension) {
+                                        val chunk = chunks[p]!!
+                                        var lx = data.x % 16; if (lx < 0) lx += 16
+                                        var lz = data.z % 16; if (lz < 0) lz += 16
+
                                         if (data.color == 0) {
-                                            val oldBlock = getRawBlock(data.x, data.y, data.z)
+                                            val oldBlock = chunk.getBlock(lx, data.y, lz)
                                             if (oldBlock != 0) {
                                                 val itemStack = ItemStack(oldBlock, 1)
                                                 val spawnX = data.x * cubeSize
                                                 val spawnY = data.y * cubeSize - 10.0 + 0.25
                                                 val spawnZ = data.z * cubeSize
-                                                val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
-                                                itemEntity.velX = (Math.random() - 0.5) * 0.2
-                                                itemEntity.velY = 0.2 // Give it a slight upward pop
-                                                itemEntity.velZ = (Math.random() - 0.5) * 0.2
-                                                // Spawnujemy w wymiarze gracza, który zniszczył blok
+                                                val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10).apply { velX = (Math.random() - 0.5) * 0.2; velY = 0.2; velZ = (Math.random() - 0.5) * 0.2 }
                                                 spawnEntity(itemEntity, senderDim)
                                             }
                                         }
 
-                                        // SCENARIUSZ 1: Chunk jest załadowany u Hosta -> Normalna aktualizacja
-                                        setBlockWithMeta(data.x, data.y, data.z, data.color, data.metadata)
+                                        chunk.setBlock(lx, data.y, lz, data.color)
+                                        chunk.setMeta(lx, data.y, lz, data.metadata.toInt())
+                                        if (data.color != 0) chunk.hasBlocks = true
+                                        chunk.modified = true // Oznaczamy do zapisu przy następnym auto-save
+
                                         refreshChunkData(cx, cz, isHighPriority = true)
                                     } else {
-                                        // SCENARIUSZ 2: Chunk jest poza zasięgiem Hosta LUB w innym wymiarze -> Edycja pliku zapisu w tle
+                                        // Jeśli chunk nie jest załadowany (lub jest w innym wymiarze),
+                                        // modyfikujemy tylko plik na dysku w tle. To jest wydajne i dynamiczne.
                                         chunkExecutor.submit {
-                                            // FIX: Load chunk from the sender's dimension
-                                            var chunk = chunkIO.loadChunk(cx, cz, senderDim)
-                                            if (chunk == null) {
-                                                chunk = chunkGenerator.generate(cx, cz)
-                                            }
+                                            val chunk = chunkIO.loadChunk(cx, cz, senderDim) ?: chunkGenerator.generate(cx, cz)
                                             var lx = data.x % 16; if (lx < 0) lx += 16
                                             var lz = data.z % 16; if (lz < 0) lz += 16
                                             if (data.y in 0..127) {
-                                                // FIX: Drop z bloku w niezaładowanym chunku (rzadkie, ale możliwe)
                                                 if (data.color == 0) {
                                                     val oldBlock = chunk.getBlock(lx, data.y, lz)
                                                     if (oldBlock != 0) {
@@ -1356,10 +1356,7 @@ class KapeLuz : JPanel() {
                                                         val spawnX = data.x * cubeSize
                                                         val spawnY = data.y * cubeSize - 10.0 + 0.25
                                                         val spawnZ = data.z * cubeSize
-                                                        val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10)
-                                                        itemEntity.velX = (Math.random() - 0.5) * 0.2
-                                                        itemEntity.velY = 0.2 // Give it a slight upward pop
-                                                        itemEntity.velZ = (Math.random() - 0.5) * 0.2
+                                                        val itemEntity = ItemEntity(itemStack, spawnX, spawnY, spawnZ, pickupDelay = 10).apply { velX = (Math.random() - 0.5) * 0.2; velY = 0.2; velZ = (Math.random() - 0.5) * 0.2 }
                                                         spawnEntity(itemEntity, senderDim)
                                                     }
                                                 }
@@ -1369,12 +1366,6 @@ class KapeLuz : JPanel() {
                                             }
                                         }
                                     }
-                                    // Host przekazuje zmianę bloku WSZYSTKIM innym graczom w TYM SAMYM wymiarze
-                                    // (Można filtrować tutaj, ale relayPacketToOthers wysyła do wszystkich.
-                                    //  Klient i tak zignoruje blok jeśli jest poza jego zasięgiem renderowania,
-                                    //  ale dla poprawności wymiarów, klient powinien wiedzieć.
-                                    //  Obecnie protokół BLOCK_SET nie ma wymiaru.
-                                    //  Więc Host powinien wysłać to TYLKO do graczy w tym samym wymiarze.)
                                     relayPacketToOthers(dataCopy, senderId = targetId)
                                 } else {
                                     // KLIENT: Zawsze aktualizuje to co widzi
@@ -1683,6 +1674,34 @@ class KapeLuz : JPanel() {
             }
 
             return // Klient nie generuje sam
+        }
+
+        // --- HOST/SINGLEPLAYER: "Leczenie" niewidzialnych chunków ---
+        // Jeśli chunk jest w pamięci, ale nie ma mesha (np. z powodu race condition przy ładowaniu),
+        // wymuszamy jego odświeżenie. Działa to jako solidne zabezpieczenie.
+        if (gameTicks % 10 == 0L) { // Uruchamiamy co 10 ticków (ok. 3 razy/sek)
+            var fixedThisTick = 0
+            val maxFixesPerTick = 10 // Limit napraw na tick, aby nie obciążać systemu
+
+            // Iterujemy po załadowanych chunkach, które są w zasięgu wzroku
+            for (cx in currentChunkX - renderDistance..currentChunkX + renderDistance) {
+                for (cz in currentChunkZ - renderDistance..currentChunkZ + renderDistance) {
+                    val p = Point(cx, cz)
+                    val chunk = chunks[p]
+
+                    // Sprawdzamy czy chunk istnieje i ma bloki (nie jest pustym powietrzem)
+                    if (chunk != null && chunk.hasBlocks) {
+                        val mesh = chunkMeshes[p]
+                        // Jeśli nie ma mesha LUB mesh jest pusty, a chunk ma bloki -> wymuś generowanie
+                        if (mesh == null || mesh.all { it.isEmpty() }) {
+                            refreshChunkData(cx, cz, isHighPriority = true)
+                            fixedThisTick++
+                            if (fixedThisTick >= maxFixesPerTick) break
+                        }
+                    }
+                }
+                if (fixedThisTick >= maxFixesPerTick) break
+            }
         }
 
         // 1. Zlecanie generowania chunków w tle (od środka na zewnątrz)

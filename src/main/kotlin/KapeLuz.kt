@@ -4883,13 +4883,15 @@ class KapeLuz : JPanel() {
         val r = color.red; val g = color.green; val b = color.blue
 
         var rowV = vStart; var rowW = wStart
+        val eps = 0.0001 // Dodano epsilon dla krawędzi
 
         for (y in minY..maxY) {
             var v = rowV; var w = rowW
             var pixelIndex = y * imageWidth + minX
 
             for (x in minX..maxX) {
-                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
+                // Zastosowanie bezpiecznego marginesu inkluzji
+                if (v >= -eps && w >= -eps && (v + w) <= 1.0 + eps) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip
@@ -4932,7 +4934,6 @@ class KapeLuz : JPanel() {
 
         val invDenom = 1.0 / denom
 
-        // Funkcja pomocnicza do obliczenia V i W w konkretnym punkcie
         fun getBarycentric(px: Double, py: Double): Pair<Double, Double> {
             val v2x = px - p1.x
             val v2y = py - p1.y
@@ -4967,6 +4968,7 @@ class KapeLuz : JPanel() {
 
         var rowV = vStart
         var rowW = wStart
+        val eps = 0.0001 // Zabezpieczenie przed przerwami między chmurami
 
         for (y in minY..maxY) {
             var v = rowV
@@ -4974,8 +4976,8 @@ class KapeLuz : JPanel() {
             var pixelIndex = y * imageWidth + minX
 
             for (x in minX..maxX) {
-                // Usunięto margines 0.001, aby uniknąć nakładania się trójkątów (double-blending)
-                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
+                // Bezpieczny warunek barycentryczny
+                if (v >= -eps && w >= -eps && (v + w) <= 1.0 + eps) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip
@@ -5157,16 +5159,14 @@ class KapeLuz : JPanel() {
     // Zmiana na public, aby mody mogły rzutować punkty 3D na ekran 2D
     fun project(v: Vector3d): Vector3d {
         val localLenght = (baseCols / 2.0) / Math.tan(Math.toRadians(fov / 2.0))
-        val zSafe = if (v.z == 0.0) 0.001 else v.z // Unikamy dzielenia przez 0
+        val zSafe = if (v.z == 0.0) 0.001 else v.z
 
-        // Perspektywa: x' = x / z
         val px = (v.x * localLenght) / zSafe
-        // Odwracamy oś Y, ponieważ na ekranie Y rośnie w dół, a w świecie 3D w górę
         val py = -(v.y * localLenght) / zSafe
 
-        // Przesunięcie na środek ekranu (gridMapy)
-        val screenX = px + (baseCols / 2)
-        val screenY = py + (baseRows / 2)
+        // Synchronizacja matematyki z szybką ścieżką w render3D
+        val screenX = px + (baseCols / 2.0)
+        val screenY = py + (baseRows / 2.0)
 
         return Vector3d(screenX, screenY, v.z)
     }
@@ -5471,13 +5471,10 @@ class KapeLuz : JPanel() {
         val z1Inv = 1.0 / z1; val z2Inv = 1.0 / z2; val z3Inv = 1.0 / z3
         val ao1z = ao1 * z1Inv; val ao2z = ao2 * z2Inv; val ao3z = ao3 * z3Inv
 
-        // Pre-kalkulacja kolorów (unikamy dostępu do obiektu Color w pętli)
         val rBase = (color shr 16) and 0xFF
         val gBase = (color shr 8) and 0xFF
         val bBase = color and 0xFF
 
-        // Gradienty barycentryczne (stałe dla trójkąta)
-        // Obliczamy dla punktu startowego (minX + 0.5, minY + 0.5)
         val startX = minX + 0.5; val startY = minY + 0.5
         val v2x_start = startX - sx1; val v2y_start = startY - sy1
         val d20_start = v2x_start * v0x + v2y_start * v0y
@@ -5488,12 +5485,14 @@ class KapeLuz : JPanel() {
         val dvdx = (d11 * v0x - d01 * v1x) * invDenom; val dwdx = (d00 * v1x - d01 * v0x) * invDenom
         val dvdy = (d11 * v0y - d01 * v1y) * invDenom; val dwdy = (d00 * v1y - d01 * v0y) * invDenom
 
+        // Epsilon naprawiający błędy numeryczne Double przy krawędziach
+        val epsilon = 0.0001
+
         for (y in minY..maxY) {
             var v = rowV; var w = rowW
             var pixelIndex = y * imageWidth + minX
             for (x in minX..maxX) {
-                // Usunięto epsilon i coerceIn dla wydajności
-                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
+                if (v >= -epsilon && w >= -epsilon && (v + w) <= 1.0 + epsilon) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip

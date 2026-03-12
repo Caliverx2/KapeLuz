@@ -4201,9 +4201,7 @@ class KapeLuz : JPanel() {
                 // 2. Sprawdzamy czy możemy wejść do sąsiada
                 val neighborMask = getSegmentOcclusionMask(nx, ny, nz)
 
-                // Fix: Jeśli ściana wejściowa jest pełna, widzimy ją, ale nie propagujemy BFS dalej (chyba że noclip).
-                if (debugNoclip || (neighborMask.toInt() and entryBit) == 0) { // Jeśli ściana wejściowa NIE jest pełna lub noclip...
-                    // Oznaczamy jako odwiedzony (zakolejkowany) TYLKO gdy faktycznie wchodzimy do środka
+                if (debugNoclip || (neighborMask.toInt() and entryBit) == 0 || (currX == startSecX && currY == startSecY && currZ == startSecZ)) {
                     bfsVisited[visitIndex] = bfsVisitToken
 
                     // ZABEZPIECZENIE: Sprawdzamy czy kolejka się nie przepełni

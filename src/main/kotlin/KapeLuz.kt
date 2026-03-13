@@ -3047,6 +3047,16 @@ class KapeLuz : JPanel() {
                     continue
                 }
 
+                // Usuwanie przedmiotów, które spadły w próżnię (void)
+                if (!isMultiplayerClient && entity.y <= -50.0 * cubeSize) {
+                    iterator.remove()
+                    if (isHost) {
+                        val packet = NetworkProtocol.encodeEntityDestroy(entity.id)
+                        peerConnections.forEach { (_, rtc) -> rtc.sendData(packet) }
+                    }
+                    continue
+                }
+
                 // --- System Łączenia Przedmiotów (Item Merging) ---
                 // TYLKO HOST/SINGLEPLAYER
                 if (!isMultiplayerClient && !entity.isBeingPickedUp && entity.itemStack.count < 64 && entity.age > 10) {
@@ -4108,13 +4118,17 @@ class KapeLuz : JPanel() {
         // 16 bloków / 4 bloki na segment = 4 segmenty na chunk
         val maxRadius = renderDistance * 4
         val diameter = maxRadius * 2 + 1
+        // Zwiększamy zakres pionowy dla BFS, aby obsłużyć latanie pod/nad światem (próżnia)
+        // 256 segmentów (1024 bloki) z offsetem 128 pozwala na swobodne latanie +/- 512 bloków od zera
+        val bfsHeight = 256
+        val bfsYOffset = 128
 
         // Resetujemy token odwiedzin (szybsze niż czyszczenie tablicy)
         bfsVisitToken++
         if (bfsVisitToken == 0) bfsVisitToken = 1 // Unikamy 0
 
         // Upewniamy się, że tablica visited jest wystarczająco duża
-        val requiredSize = diameter * 32 * diameter
+        val requiredSize = diameter * bfsHeight * diameter
         if (bfsVisited.size < requiredSize) {
             bfsVisited = IntArray(requiredSize)
             bfsRendered = IntArray(requiredSize)
@@ -4135,8 +4149,12 @@ class KapeLuz : JPanel() {
         // Oznaczamy startNode jako odwiedzony
         // Mapowanie (relativeX, y, relativeZ) -> index
         // relativeX = x - startSecX + maxRadius
-        val startIndex = (maxRadius * 32 + startSecY) * diameter + maxRadius
-        bfsVisited[startIndex] = bfsVisitToken
+        // Używamy bfsYOffset, aby obsłużyć ujemne startSecY
+        val startIndex = (maxRadius * bfsHeight + (startSecY + bfsYOffset)) * diameter + maxRadius
+        // Zabezpieczenie przed wyjściem poza tablicę przy skrajnych wartościach Y
+        if (startIndex in bfsVisited.indices) {
+            bfsVisited[startIndex] = bfsVisitToken
+        }
 
         // Kierunki i odpowiadające im bity ścian:
         // Triple(dx, dy, dz), ExitBit (z obecnego), EntryBit (do sąsiada)
@@ -4158,9 +4176,9 @@ class KapeLuz : JPanel() {
             // (Mogliśmy go dodać wcześniej jako "ścianę" z innego kierunku)
             val dxC = currX - startSecX
             val dzC = currZ - startSecZ
-            val currIndex = ((dxC + maxRadius) * 32 + currY) * diameter + (dzC + maxRadius)
+            val currIndex = ((dxC + maxRadius) * bfsHeight + (currY + bfsYOffset)) * diameter + (dzC + maxRadius)
 
-            if (bfsRendered[currIndex] != bfsVisitToken) {
+            if (currIndex in bfsRendered.indices && bfsRendered[currIndex] != bfsVisitToken) {
                 if (!isSegmentEmptyBySec(currX, currY, currZ)) {
                     if (visibleSegmentsCount * 3 >= visibleSegmentsFlat.size) {
                         visibleSegmentsFlat = visibleSegmentsFlat.copyOf(visibleSegmentsFlat.size * 2)
@@ -4181,20 +4199,22 @@ class KapeLuz : JPanel() {
                 val ny = currY + dir.second
                 val nz = currZ + dir.third
 
-                if (ny < 0 || ny > 31) continue
+                // Zmieniony warunek: Pozwalamy na wyjście poza 0..31, ale w granicach naszego bufora BFS
+                if (ny < -bfsYOffset || ny >= bfsHeight - bfsYOffset) continue
 
                 val dx = nx - startSecX
                 val dz = nz - startSecZ
                 if (abs(dx) > maxRadius || abs(dz) > maxRadius) continue
 
-                val visitIndex = ((dx + maxRadius) * 32 + ny) * diameter + (dz + maxRadius)
+                val visitIndex = ((dx + maxRadius) * bfsHeight + (ny + bfsYOffset)) * diameter + (dz + maxRadius)
                 // Jeśli już odwiedziliśmy (zakolejkowaliśmy) ten segment, pomijamy
                 if (bfsVisited[visitIndex] == bfsVisitToken) continue
 
                 // 1. Sprawdzamy czy możemy wyjść z obecnego segmentu w tym kierunku
                 // Jeśli ściana wyjściowa jest pełna, a my nie jesteśmy wewnątrz niej (kamera), to nie widzimy przez nią.
                 // Wyjątek: Jesteśmy w segmencie startowym (kamera może być wewnątrz bloku/ściany).
-                if (!debugNoclip && (currMask.toInt() and exitBit) != 0 && (currX != startSecX || currY != startSecY || currZ != startSecZ)) {
+                val dist = abs(currX - startSecX) + abs(currY - startSecY) + abs(currZ - startSecZ)
+                if (!debugNoclip && (currMask.toInt() and exitBit) != 0 && dist > 1) {
                     continue
                 }
 
@@ -4265,7 +4285,8 @@ class KapeLuz : JPanel() {
         if (visibilityGraphDirty || camSecX != lastCamSecX || camSecY != lastCamSecY || camSecZ != lastCamSecZ ||
             abs(yaw - lastYaw) > 0.001 || abs(pitch - lastPitch) > 0.001) {
             // Fix: Clamp Y to 0..15 to ensure BFS starts within valid world bounds even if player is outside
-            rebuildVisibilityGraph(camSecX, camSecY.coerceIn(0, 31), camSecZ)
+            // FIX: Nie ograniczamy Y, aby pozwolić na poprawne obliczanie widoczności z dołu/góry świata (próżnia)
+            rebuildVisibilityGraph(camSecX, camSecY, camSecZ)
             lastCamSecX = camSecX
             lastCamSecY = camSecY
             lastCamSecZ = camSecZ

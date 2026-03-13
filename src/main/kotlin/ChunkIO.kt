@@ -309,11 +309,15 @@ open class ChunkIO(worldName: String) {
                 }
 
                 // 4. Entities
-                if (dis.available() > 0) {
+                if (dis.available() >= 4) { // Fix: Sprawdzamy czy mamy min. 4 bajty na odczyt licznika (Int)
                     val entityCount = dis.readInt()
                     for (i in 0 until entityCount) {
-                        val entity = readEntity(dis)
-                        if (entity != null) chunk.storedEntities.add(entity)
+                        try {
+                            val entity = readEntity(dis)
+                            if (entity != null) chunk.storedEntities.add(entity)
+                        } catch (e: EOFException) {
+                            break // Jeśli dane urwą się w trakcie czytania bytu, przerywamy bezpiecznie
+                        }
                     }
                 }
             }

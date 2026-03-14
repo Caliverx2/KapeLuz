@@ -74,7 +74,7 @@ data class ItemEntity(val itemStack: ItemStack, private val initialX: Double, pr
 
 // --- Stany gry i elementy UI ---
 enum class GameState {
-    MAIN_MENU, WORLD_SELECTION, MULTIPLAYER, CREATE_WORLD, IN_GAME, PAUSED
+    MAIN_MENU, WORLD_SELECTION, MULTIPLAYER, CREATE_WORLD, IN_GAME, PAUSED, OPTIONS
 }
 
 data class ItemStack(val color: Int, var count: Int)
@@ -518,6 +518,7 @@ class KapeLuz : JPanel() {
 
     // --- Game State & Menu System ---
     var gameState = GameState.MAIN_MENU
+    private var previousGameState: GameState = GameState.MAIN_MENU
     private var worldList = listOf<String>()
     private var newWorldName = "New World"
     private var newWorldSeed = ""
@@ -628,7 +629,10 @@ class KapeLuz : JPanel() {
             gameState = GameState.MULTIPLAYER
         })
         mainMenu.add(UIButton(uiReferenceWidth/2 - 200, 390, 400, 50, "Options...") {
-        }.apply { isEnabled = false })
+            previousGameState = GameState.MAIN_MENU
+            updateOptionsMenu()
+            gameState = GameState.OPTIONS
+        })
         mainMenu.add(UIButton(uiReferenceWidth/2 - 200, 460, 400, 50, "Quit Game") {
             running = false
             exitProcess(0)
@@ -649,6 +653,9 @@ class KapeLuz : JPanel() {
         val worldSelection = uiManager.getPanel(GameState.WORLD_SELECTION)
         worldSelection.add(UIBackground(Color(30, 30, 30)))
 
+        // --- Options Menu ---
+        // Content populated dynamically via updateOptionsMenu()
+
         // --- Pause Menu ---
         val pauseMenu = uiManager.getPanel(GameState.PAUSED)
         // Overlay background handled in render (or add semi-transparent background here)
@@ -667,7 +674,10 @@ class KapeLuz : JPanel() {
         pauseMenu.add(UIButton(uiReferenceWidth/2 + 15 - 7, uiReferenceHeight/2 - 50 - 15, 200 - 7 + 10, 50, "Statistics", fontSize = 28f) {
         }.apply { isEnabled = false })
         pauseMenu.add(UIButton(uiReferenceWidth/2 - 200 - 10, uiReferenceHeight/2 + 15, 200 - 7 + 10, 50, "Options...", fontSize = 28f) {
-        }.apply { isEnabled = false })
+            previousGameState = GameState.PAUSED
+            updateOptionsMenu()
+            gameState = GameState.OPTIONS
+        })
 
         openServerButtonComponent = UIButton(uiReferenceWidth/2 + 15 - 7, uiReferenceHeight/2 + 15, 200 - 7 + 10, 50, "Open Server", fontSize = 28f) {
             // 1. Inicjalizacja klienta sygnalizacyjnego
@@ -792,6 +802,21 @@ class KapeLuz : JPanel() {
             }
         )
         signalingClient?.connect()
+    }
+
+    private fun updateOptionsMenu() {
+        val options = uiManager.getPanel(GameState.OPTIONS)
+        options.clear()
+
+        if (previousGameState == GameState.PAUSED || previousGameState == GameState.IN_GAME) {
+            options.add(UIBackground(Color(0, 0, 0, 150)))
+        } else {
+            options.add(UIBackground(Color(30, 30, 30)))
+        }
+
+        options.add(UIButton(uiReferenceWidth/2 - 200 - 10, uiReferenceHeight/2 - 130, 420, 50, "Done") {
+            gameState = previousGameState
+        })
     }
 
     private fun updateWorldList() {
@@ -5806,6 +5831,11 @@ class KapeLuz : JPanel() {
             GameState.PAUSED -> {
                 renderGame(g2d)
                 // Overlay is handled by UIManager
+            }
+            GameState.OPTIONS -> {
+                if (previousGameState == GameState.PAUSED || previousGameState == GameState.IN_GAME) {
+                    renderGame(g2d)
+                }
             }
             else -> {
                 // Other states are fully handled by UIManager

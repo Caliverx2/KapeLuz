@@ -717,7 +717,7 @@ class KapeLuz : JPanel() {
         })
         createWorld.add(UIButton(uiReferenceWidth/2 + 15, 460, 400, 50, "Cancel") {
             // Jeśli nie ma żadnych światów, "Cancel" cofa do Menu Głównego, a nie do pustej listy
-            if (listWorlds().isEmpty()) {
+            if (listWorlds().filter { it != "MultiplayerSession" }.isEmpty()) {
                 gameState = GameState.MAIN_MENU
             } else {
                 gameState = GameState.WORLD_SELECTION
@@ -820,10 +820,10 @@ class KapeLuz : JPanel() {
     }
 
     private fun updateWorldList() {
-        worldList = listWorlds()
+        worldList = listWorlds().filter { it != "MultiplayerSession" }
 
         // Jeśli nie ma żadnych światów, od razu przechodzimy do tworzenia nowego
-        if (worldList.isEmpty()) {
+        if (worldList.isEmpty() && listWorlds().none { it != "MultiplayerSession" }) {
             showCreateWorldMenu()
             return
         }
@@ -876,7 +876,7 @@ class KapeLuz : JPanel() {
             repaint()
             return
         }
-        if (listWorlds().any { it.equals(name, ignoreCase = true) }) {
+        if (listWorlds().filter { it != "MultiplayerSession" }.any { it.equals(name, ignoreCase = true) }) {
             errorTextComponent?.text = "World '$name' already exists."
             repaint()
             return

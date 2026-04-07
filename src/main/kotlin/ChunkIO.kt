@@ -15,14 +15,27 @@ import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Zwraca listę nazw światów (folderów) znajdujących się w katalogu zapisu gry.
+ * Reprezentuje podstawowe informacje o świecie do wyświetlenia na liście.
  */
-fun listWorlds(): List<String> {
+data class WorldSummary(val folderName: String, val displayName: String)
+
+/**
+ * Zwraca listę światów znajdujących się w katalogu zapisu gry.
+ * Nazwa wyświetlana jest pobierana z pliku world.dat (parametr worldName).
+ * Pomija folder MultiplayerSession.
+ */
+fun listWorlds(): List<WorldSummary> {
     val savesDir = File(gameDir, "saves")
     if (!savesDir.exists() || !savesDir.isDirectory) {
         return emptyList()
     }
-    return savesDir.listFiles { file -> file.isDirectory }?.map { it.name }?.sorted() ?: emptyList()
+    return savesDir.listFiles { file -> file.isDirectory && file.name != "MultiplayerSession" }
+        ?.map { folder ->
+            val tempIO = ChunkIO(folder.name)
+            val data = tempIO.loadWorldData()
+            // Jeśli świat nie ma zapisanego parametru worldName (stary format) lub jest on pusty, używamy nazwy folderu
+            WorldSummary(folder.name, data?.worldName?.takeIf { it.isNotBlank() } ?: folder.name)
+        }?.sortedBy { it.displayName.lowercase() } ?: emptyList()
 }
 
 data class WorldData(
@@ -39,7 +52,8 @@ data class WorldData(
     val debugXray: Boolean = false,
     val gameTime: Double = 12.0,
     val dayCounter: Int = 0,
-    val localDimension: String = "overworld"
+    val localDimension: String = "overworld",
+    val worldName: String = ""
 )
 
 open class ChunkIO(worldName: String) {
@@ -57,7 +71,7 @@ open class ChunkIO(worldName: String) {
     }
 
     // Używamy scentralizowanego folderu gry zdefiniowanego w KapeLuzModAPI.kt
-    val saveDir = File(gameDir, "saves/$worldName").apply { mkdirs() }
+    val saveDir = File(gameDir, "saves/$worldName")
 
     // --- FIX: Race Condition ---
     // Mapa zamków (locków) dla każdego pliku regionu, aby zapobiec jednoczesnemu zapisowi i odczytowi z różnych wątków.
@@ -66,6 +80,7 @@ open class ChunkIO(worldName: String) {
     private fun getLockForFile(file: File): Any = regionFileLocks.computeIfAbsent(file) { Any() }
 
     open fun saveChunk(chunk: Chunk, dimension: String = "overworld") {
+        saveDir.mkdirs()
         val regionX = chunk.x shr 5
         val regionZ = chunk.z shr 5
         val regionDir = File(saveDir, "dimensions/$dimension/regions").apply { mkdirs() }
@@ -386,6 +401,7 @@ open class ChunkIO(worldName: String) {
     }
 
     fun saveWorldData(data: WorldData) {
+        saveDir.mkdirs()
         try {
             val file = File(saveDir, "world.dat")
             DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { dos ->
@@ -419,6 +435,7 @@ open class ChunkIO(worldName: String) {
                 writeField("gameTime", TAG_DOUBLE, data.gameTime)
                 writeField("dayCounter", TAG_INT, data.dayCounter)
                 writeField("localDimension", TAG_STRING, data.localDimension)
+                writeField("worldName", TAG_STRING, data.worldName)
 
                 dos.writeByte(TAG_END.toInt()) // Znacznik końca danych
             }
@@ -458,6 +475,7 @@ open class ChunkIO(worldName: String) {
                 var gameTime = 12.0
                 var dayCounter = 0
                 var localDimension = "overworld"
+                var worldName = ""
 
                 try {
                     if (version >= 2) {
@@ -489,6 +507,7 @@ open class ChunkIO(worldName: String) {
                                 "gameTime" -> gameTime = value as Double
                                 "dayCounter" -> dayCounter = value as Int
                                 "localDimension" -> localDimension = value as String
+                                "worldName" -> worldName = value as String
                             }
                         }
                     } else {
@@ -498,7 +517,7 @@ open class ChunkIO(worldName: String) {
                     // Koniec pliku - normalne zachowanie
                 }
 
-                WorldData(seed, x, y, z, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension)
+                WorldData(seed, x, y, z, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, worldName)
             }
         } catch (e: IOException) {
             e.printStackTrace()

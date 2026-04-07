@@ -140,6 +140,8 @@ class KapeLuz : JPanel() {
     val playerHeight = 1.8
 
     // Kamera
+    var currentWorldFolderName = ""
+    var currentWorldDisplayName = ""
     var localDimension = "overworld"
     var fov = 90.0
     var camX = 0.0
@@ -519,7 +521,7 @@ class KapeLuz : JPanel() {
     // --- Game State & Menu System ---
     var gameState = GameState.MAIN_MENU
     private var previousGameState: GameState = GameState.MAIN_MENU
-    private var worldList = listOf<String>()
+    private var worldList = listOf<WorldSummary>()
     private var newWorldName = "New World"
     private var newWorldSeed = ""
 
@@ -620,6 +622,7 @@ class KapeLuz : JPanel() {
         val mainMenu = uiManager.getPanel(GameState.MAIN_MENU)
         mainMenu.add(UIBackground(Color(30, 30, 30)))
         mainMenu.add(UIText(uiReferenceWidth/2, 60, "KapeLuż", 96f, Color.YELLOW, true))
+        mainMenu.add(UIText(10, 510, "KapeLuż 0.5", 20f, Color.WHITE))
 
         mainMenu.add(UIButton(uiReferenceWidth/2 - 200, 250, 400, 50, "Singleplayer") {
             gameState = GameState.WORLD_SELECTION
@@ -717,7 +720,7 @@ class KapeLuz : JPanel() {
         })
         createWorld.add(UIButton(uiReferenceWidth/2 + 15, 460, 400, 50, "Cancel") {
             // Jeśli nie ma żadnych światów, "Cancel" cofa do Menu Głównego, a nie do pustej listy
-            if (listWorlds().filter { it != "MultiplayerSession" }.isEmpty()) {
+            if (listWorlds().isEmpty()) {
                 gameState = GameState.MAIN_MENU
             } else {
                 gameState = GameState.WORLD_SELECTION
@@ -820,10 +823,10 @@ class KapeLuz : JPanel() {
     }
 
     private fun updateWorldList() {
-        worldList = listWorlds().filter { it != "MultiplayerSession" }
+        worldList = listWorlds()
 
         // Jeśli nie ma żadnych światów, od razu przechodzimy do tworzenia nowego
-        if (worldList.isEmpty() && listWorlds().none { it != "MultiplayerSession" }) {
+        if (worldList.isEmpty()) {
             showCreateWorldMenu()
             return
         }
@@ -840,10 +843,10 @@ class KapeLuz : JPanel() {
         val scrollPanel = UIScrollPanel(uiReferenceWidth/2 - 210, 70, 420, listHeight)
 
         var currentY = 0 // Relatywne Y wewnątrz scroll panelu
-        worldList.forEach { worldName ->
+        worldList.forEach { summary ->
             // Dodajemy przyciski do scroll panelu (x=0 oznacza lewą krawędź scroll panelu)
-            scrollPanel.addChild(UIButton(10, currentY, 380, 40, worldName, textAlign = TextAlign.LEFT, padding = 10, tooltip = worldName) {
-                startGame(worldName)
+            scrollPanel.addChild(UIButton(10, currentY, 380, 40, summary.displayName, textAlign = TextAlign.LEFT, padding = 10, tooltip = summary.folderName) {
+                startGame(summary.folderName)
             })
             currentY += 50
         }
@@ -876,26 +879,30 @@ class KapeLuz : JPanel() {
             repaint()
             return
         }
-        if (listWorlds().filter { it != "MultiplayerSession" }.any { it.equals(name, ignoreCase = true) }) {
-            errorTextComponent?.text = "World '$name' already exists."
-            repaint()
-            return
-        }
 
         hideCreateWorldMenu()
+
+        // Generowanie unikalnej nazwy folderu (jeśli nazwa już zajęta, dodajemy (2), (3) itd.)
+        var folderName = name
+        var count = 2
+        val savesDir = File(gameDir, "saves")
+        while (File(savesDir, folderName).exists()) {
+            folderName = "$name ($count)"
+            count++
+        }
 
         val finalSeed = newWorldSeed.trim().toIntOrNull() ?: name.hashCode()
 
         // Pre-create the world data file so startGame can load it
-        val newChunkIO = ChunkIO(name)
+        val newChunkIO = ChunkIO(folderName)
         val tempNoise = PerlinNoise(finalSeed)
         val tempChunkGen = ChunkGenerator(finalSeed, oreColors)
         val spawnH = tempChunkGen.getTerrainHeight(0, 0)
         val spawnY = (spawnH + 3) * cubeSize - 10.0
 
-        newChunkIO.saveWorldData(WorldData(finalSeed, 0.0, spawnY, 0.0, 0.0, 0.0))
+        newChunkIO.saveWorldData(WorldData(finalSeed, 0.0, spawnY, 0.0, 0.0, 0.0, worldName = name))
 
-        startGame(name)
+        startGame(folderName)
     }
 
     private fun sendDisconnectPacket() {
@@ -928,7 +935,7 @@ class KapeLuz : JPanel() {
             chunkIO.saveChunk(chunk, localDimension)
             chunk.modified = false
         }
-        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension))
+        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
         println("All modified chunks saved.")
 
         // FIX: Ustawiamy flagę, że to my zamykamy połączenie, aby connectWithRetry nie próbował łączyć ponownie
@@ -952,6 +959,8 @@ class KapeLuz : JPanel() {
         chunksBeingGenerated.clear()
         chunksToMeshQueue.clear()
         inventory = arrayOfNulls<ItemStack>(9)
+        currentWorldFolderName = ""
+        currentWorldDisplayName = ""
         lastChunkX = Int.MAX_VALUE
         lastChunkZ = Int.MAX_VALUE
         gameTime = 12.0
@@ -988,17 +997,18 @@ class KapeLuz : JPanel() {
         roomCodeComponent?.text = "" // Reset kodu przy restarcie
     }
 
-    private fun startGame(worldName: String, isClient: Boolean = false) {
+    private fun startGame(folderName: String, isClient: Boolean = false) {
         resetGame()
+        currentWorldFolderName = folderName
 
         // FIX: Jeśli jesteśmy klientem, usuwamy stary zapis sesji multiplayer, aby uniknąć kolizji chunków
         if (isClient) {
-            val sessionDir = File(gameDir, "saves/$worldName")
+            val sessionDir = File(gameDir, "saves/$folderName")
             if (sessionDir.exists()) sessionDir.deleteRecursively()
         }
 
         // Inicjalizacja specyficzna dla świata
-        chunkIO = ChunkIO(worldName)
+        chunkIO = ChunkIO(folderName)
 
         val worldData = chunkIO.loadWorldData()
         if (worldData != null) {
@@ -1016,9 +1026,11 @@ class KapeLuz : JPanel() {
             gameTime = worldData.gameTime
             dayCounter = worldData.dayCounter
             localDimension = worldData.localDimension
+            currentWorldDisplayName = worldData.worldName.ifBlank { folderName }
         } else {
-            seed = worldName.hashCode() // Domyślny seed dla nowego świata (unikalny per nazwa)
+            seed = folderName.hashCode() // Domyślny seed dla nowego świata
             localDimension = "overworld"
+            currentWorldDisplayName = folderName
         }
 
         noise = PerlinNoise(seed)
@@ -1965,7 +1977,7 @@ class KapeLuz : JPanel() {
         // Remove saved entities from RAM
         entities.removeIf { it.dimension == localDimension }
 
-        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension))
+        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
         if (savedCount > 0) println("Auto-saved $savedCount chunks in $localDimension.")
 
         localDimension = dim
@@ -3912,7 +3924,7 @@ class KapeLuz : JPanel() {
                                     savedCount++
                                 }
                             }
-                            chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension))
+                            chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
                             if (savedCount > 0) println("Auto-saved $savedCount chunks in $localDimension (Background).")
                         }
                     }

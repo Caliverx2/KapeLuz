@@ -53,6 +53,7 @@ class UIButton(
     var padding: Int = 0,
     var fontSize: Float = 40f,
     tooltip: String? = null,
+    var icon: BufferedImage? = null,
     var action: () -> Unit
 ) : UIComponent() {
     init {
@@ -76,6 +77,11 @@ class UIButton(
             g.drawImage(it, x, y, width, height, null)
         }
 
+        // Rysowanie ikony świata (40x40)
+        icon?.let {
+            g.drawImage(it, x, y, height, height, null) // height to 40
+        }
+
         // --- LOGIKA CLIPPINGU ---
         val oldClip = g.clip
         g.clipRect(x, y, width, height)
@@ -87,8 +93,10 @@ class UIButton(
         val textWidth = fm.stringWidth(text)
         val textHeight = fm.ascent
 
+        val iconOffset = if (icon != null) height + 5 else 0
+
         val drawX = when (textAlign) {
-            TextAlign.LEFT   -> x + padding
+            TextAlign.LEFT   -> x + padding + iconOffset
             TextAlign.CENTER -> x + (width - textWidth) / 2
             TextAlign.RIGHT  -> x + width - textWidth - padding
         }

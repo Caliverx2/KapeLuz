@@ -845,7 +845,7 @@ class KapeLuz : JPanel() {
         var currentY = 0 // Relatywne Y wewnątrz scroll panelu
         worldList.forEach { summary ->
             // Dodajemy przyciski do scroll panelu (x=0 oznacza lewą krawędź scroll panelu)
-            scrollPanel.addChild(UIButton(10, currentY, 380, 40, summary.displayName, textAlign = TextAlign.LEFT, padding = 10, tooltip = summary.folderName) {
+            scrollPanel.addChild(UIButton(10, currentY, 380, 40, summary.displayName, textAlign = TextAlign.LEFT, padding = 10, tooltip = summary.folderName, icon = summary.icon) {
                 startGame(summary.folderName)
             })
             currentY += 50
@@ -935,6 +935,22 @@ class KapeLuz : JPanel() {
             chunkIO.saveChunk(chunk, localDimension)
             chunk.modified = false
         }
+
+        // --- Zapisywanie ikony świata (Screenshot) ---
+        try {
+            val iconFile = File(chunkIO.saveDir, "icon.png")
+            // Wycinamy środkowy kwadrat z renderu gry
+            val size = minOf(displayImage.width, displayImage.height)
+            val subImage = displayImage.getSubimage((displayImage.width - size) / 2, (displayImage.height - size) / 2, size, size)
+            // Skalujemy do 100x100
+            val scaledIcon = BufferedImage(100, 100, BufferedImage.TYPE_INT_RGB)
+            val gIcon = scaledIcon.createGraphics()
+            gIcon.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+            gIcon.drawImage(subImage, 0, 0, 100, 100, null)
+            gIcon.dispose()
+            ImageIO.write(scaledIcon, "png", iconFile)
+        } catch (e: Exception) { println("Failed to save world icon: ${e.message}") }
+
         chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
         println("All modified chunks saved.")
 

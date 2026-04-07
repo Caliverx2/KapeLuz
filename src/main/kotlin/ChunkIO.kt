@@ -1,5 +1,6 @@
 package org.lewapnoob.KapeLuz
 
+import java.awt.image.BufferedImage
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
@@ -13,11 +14,22 @@ import java.io.EOFException
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentHashMap
+import javax.imageio.ImageIO
 
 /**
  * Reprezentuje podstawowe informacje o świecie do wyświetlenia na liście.
  */
-data class WorldSummary(val folderName: String, val displayName: String)
+data class WorldSummary(val folderName: String, val displayName: String, val icon: BufferedImage)
+
+private val defaultWorldIcon: BufferedImage by lazy {
+    try {
+        val stream = ChunkIO::class.java.getResourceAsStream("/iconsGUI/world.png")
+        if (stream != null) ImageIO.read(stream)
+        else BufferedImage(100, 100, BufferedImage.TYPE_INT_RGB)
+    } catch (e: Exception) {
+        BufferedImage(100, 100, BufferedImage.TYPE_INT_RGB)
+    }
+}
 
 /**
  * Zwraca listę światów znajdujących się w katalogu zapisu gry.
@@ -33,8 +45,15 @@ fun listWorlds(): List<WorldSummary> {
         ?.map { folder ->
             val tempIO = ChunkIO(folder.name)
             val data = tempIO.loadWorldData()
+
+            // Próba załadowania ikony świata
+            val iconFile = File(folder, "icon.png")
+            val icon = if (iconFile.exists()) {
+                try { ImageIO.read(iconFile) } catch (e: Exception) { defaultWorldIcon }
+            } else defaultWorldIcon
+
             // Jeśli świat nie ma zapisanego parametru worldName (stary format) lub jest on pusty, używamy nazwy folderu
-            WorldSummary(folder.name, data?.worldName?.takeIf { it.isNotBlank() } ?: folder.name)
+            WorldSummary(folder.name, data?.worldName?.takeIf { it.isNotBlank() } ?: folder.name, icon)
         }?.sortedBy { it.displayName.lowercase() } ?: emptyList()
 }
 

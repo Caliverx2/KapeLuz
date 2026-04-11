@@ -192,6 +192,23 @@ class UITextField(
         }
     }
 
+    private fun getLineInfo(): Pair<List<String>, List<Int>> {
+        val lines = text.split("\n")
+        val lineStartIndices = mutableListOf<Int>()
+        var currentIdx = 0
+        for (line in lines) {
+            lineStartIndices.add(currentIdx)
+            currentIdx += line.length + 1
+        }
+        return lines to lineStartIndices
+    }
+
+    private fun getCursorLineAndOffset(index: Int, lines: List<String>, starts: List<Int>): Pair<Int, Int> {
+        val line = starts.indexOfLast { index >= it }.coerceAtLeast(0)
+        val offset = (index - starts[line]).coerceIn(0, lines[line].length)
+        return line to offset
+    }
+
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
         if (!isVisible) return
 
@@ -214,15 +231,18 @@ class UITextField(
         g.font = game.fpsFont.deriveFont(32f)
         val fm = g.fontMetrics
         lastFontMetrics = fm
-        
-        // --- LOGIKA PRZEWIJANIA (SCROLL) ---
-        val visibleWidth = width - (padding * 2)
-        val cursorPixelPos = fm.stringWidth(text.substring(0, cursorIndex))
-        val textWidth = fm.stringWidth(text)
 
-        if (textWidth <= visibleWidth) {
-            targetScrollOffset = 0
-        } else {
+        // --- LOGIKA PRZEWIJANIA (SCROLL) ---
+        val (lines, lineStartIndices) = getLineInfo()
+        val (cursorLine, cursorOffsetInLine) = getCursorLineAndOffset(cursorIndex, lines, lineStartIndices)
+
+        val textInCursorLine = lines[cursorLine]
+
+        val visibleWidth = width - (padding * 2)
+        val cursorPixelPos = fm.stringWidth(textInCursorLine.substring(0, cursorOffsetInLine))
+        val currentLineWidth = fm.stringWidth(textInCursorLine)
+
+        if (currentLineWidth > visibleWidth) {
             // Jeśli kursor wyjechał w prawo poza widok
             if (cursorPixelPos > targetScrollOffset + visibleWidth) {
                 targetScrollOffset = cursorPixelPos - visibleWidth
@@ -231,38 +251,54 @@ class UITextField(
             if (cursorPixelPos < targetScrollOffset) {
                 targetScrollOffset = cursorPixelPos
             }
+        } else {
+            targetScrollOffset = 0
         }
-        // Upewnij się, że target jest w prawidłowym zakresie
-        targetScrollOffset = targetScrollOffset.coerceIn(0, max(0, textWidth - visibleWidth))
+        
+        targetScrollOffset = targetScrollOffset.coerceIn(0, max(0, currentLineWidth - visibleWidth))
 
-        // Płynna animacja do docelowego offsetu
-        val animationFactor = 0.3 // Im większa wartość (do 1.0), tym szybsza animacja
-        currentScrollOffset += (targetScrollOffset - currentScrollOffset) * animationFactor
-        if (abs(targetScrollOffset - currentScrollOffset) < 0.5) {
-            currentScrollOffset = targetScrollOffset.toDouble()
-        }
+        currentScrollOffset += (targetScrollOffset - currentScrollOffset) * 0.3
+        if (abs(targetScrollOffset - currentScrollOffset) < 0.5) currentScrollOffset = targetScrollOffset.toDouble()
         val renderScrollOffset = currentScrollOffset.toInt()
 
-        val drawY = y + fm.ascent
+        // --- RENDEROWANIE TEKSTU I ZAZNACZENIA ---
+        val (selStart, selEnd) = getSelectionBounds()
+        var currentLineY = y + fm.ascent + 5
 
-        // Rysowanie zaznaczenia
-        if (isFocused) {
-            val (start, end) = getSelectionBounds()
-            if (start != end) {
-                val prefixWidth = fm.stringWidth(text.substring(0, start))
-                val selWidth = fm.stringWidth(text.substring(start, end))
-                g.color = Color(0, 0, 255, 128) // Niebieskie tło zaznaczenia
-                g.fillRect(x + padding + prefixWidth - renderScrollOffset, y + 5, selWidth, height - 10)
+        for (i in lines.indices) {
+            val lineText = lines[i]
+            val lineStart = lineStartIndices[i]
+            val lineEnd = lineStart + lineText.length
+
+            // Rysowanie zaznaczenia dla danej linii
+            if (isFocused && selStart != selEnd) {
+                val intersectStart = max(selStart, lineStart)
+                val intersectEnd = min(selEnd, lineEnd)
+
+                if (intersectStart < intersectEnd) {
+                    val prefixInLine = lineText.substring(0, intersectStart - lineStart)
+                    val selectionInLine = lineText.substring(intersectStart - lineStart, intersectEnd - lineStart)
+                    
+                    val selX = x + padding + fm.stringWidth(prefixInLine) - renderScrollOffset
+                    val selW = fm.stringWidth(selectionInLine)
+                    
+                    g.color = Color(0, 0, 255, 128)
+                    g.fillRect(selX, currentLineY - fm.ascent, selW, fm.height)
+                }
             }
+
+            g.color = Color.WHITE
+            g.drawString(lineText, x + padding - renderScrollOffset, currentLineY)
+            currentLineY += fm.height
         }
 
-        g.color = Color.WHITE
-        g.drawString(text, x + padding - renderScrollOffset, drawY)
-
-        // Rysowanie kursora
-        if (isFocused && (System.currentTimeMillis() / 500) % 2 == 0L) {
-            val cursorX = x + padding + cursorPixelPos - renderScrollOffset
-            g.fillRect(cursorX, y + 5, 2, height - 10)
+        // Rysowanie kursora (z uwzględnieniem linii)
+        if (isFocused) {
+            if ((System.currentTimeMillis() / 500) % 2 == 0L) {
+                val cursorX = x + padding + cursorPixelPos - renderScrollOffset
+                val cursorY = y + 5 + (cursorLine * fm.height)
+                g.fillRect(cursorX, cursorY, 2, fm.height)
+            }
         }
         g.clip = oldClip
     }
@@ -272,25 +308,25 @@ class UITextField(
         isFocused = isMouseOver(clickX, clickY)
         
         if (isFocused && lastFontMetrics != null) {
-            // Obliczanie pozycji kursora na podstawie kliknięcia
             val fm = lastFontMetrics!!
-            // Uwzględniamy scrollOffset przy kliknięciu
+            val (lines, starts) = getLineInfo()
+
+            val localY = clickY - (y + 5)
+            val clickedLine = (localY / fm.height).coerceIn(0, lines.size - 1)
+
             val localX = clickX - (x + padding) + currentScrollOffset.toInt()
-            var bestIndex = 0
+            val lineText = lines[clickedLine]
+            var charOffset = 0
             var minDiff = Int.MAX_VALUE
-            
-            for (i in 0..text.length) {
-                val w = fm.stringWidth(text.substring(0, i))
+            for (i in 0..lineText.length) {
+                val w = fm.stringWidth(lineText.substring(0, i))
                 val diff = abs(w - localX)
                 if (diff < minDiff) {
                     minDiff = diff
-                    bestIndex = i
-                } else {
-                    // Jeśli różnica zaczyna rosnąć, to znaczy, że minęliśmy najlepszy punkt
-                    break 
-                }
+                    charOffset = i
+                } else break
             }
-            cursorIndex = bestIndex
+            cursorIndex = starts[clickedLine] + charOffset
             selectionStartIndex = cursorIndex // Reset zaznaczenia przy kliknięciu
         }
         return isFocused
@@ -300,20 +336,24 @@ class UITextField(
     override fun onDrag(dragX: Int, dragY: Int) {
         if (isFocused && lastFontMetrics != null) {
             val fm = lastFontMetrics!!
-            // Uwzględniamy scrollOffset przy przeciąganiu
+            val (lines, starts) = getLineInfo()
+
+            val localY = dragY - (y + 5)
+            val clickedLine = (localY / fm.height).coerceIn(0, lines.size - 1)
+
             val localX = dragX - (x + padding) + currentScrollOffset.toInt()
-            var bestIndex = 0
+            val lineText = lines[clickedLine]
+            var charOffset = 0
             var minDiff = Int.MAX_VALUE
-            
-            for (i in 0..text.length) {
-                val w = fm.stringWidth(text.substring(0, i))
+            for (i in 0..lineText.length) {
+                val w = fm.stringWidth(lineText.substring(0, i))
                 val diff = abs(w - localX)
                 if (diff < minDiff) {
                     minDiff = diff
-                    bestIndex = i
+                    charOffset = i
                 } else break
             }
-            cursorIndex = bestIndex
+            cursorIndex = starts[clickedLine] + charOffset
             // Nie resetujemy selectionStartIndex podczas przeciągania
         }
     }
@@ -328,6 +368,28 @@ class UITextField(
             when (e.keyCode) {
                 KeyEvent.VK_LEFT -> {
                     if (cursorIndex > 0) cursorIndex--
+                    if (!isShift) selectionStartIndex = cursorIndex
+                    return true
+                }
+                KeyEvent.VK_UP -> {
+                    val (lines, starts) = getLineInfo()
+                    val (line, offset) = getCursorLineAndOffset(cursorIndex, lines, starts)
+                    if (line > 0) {
+                        val targetLine = line - 1
+                        val newOffset = min(offset, lines[targetLine].length)
+                        cursorIndex = starts[targetLine] + newOffset
+                    } else cursorIndex = 0
+                    if (!isShift) selectionStartIndex = cursorIndex
+                    return true
+                }
+                KeyEvent.VK_DOWN -> {
+                    val (lines, starts) = getLineInfo()
+                    val (line, offset) = getCursorLineAndOffset(cursorIndex, lines, starts)
+                    if (line < lines.size - 1) {
+                        val targetLine = line + 1
+                        val newOffset = min(offset, lines[targetLine].length)
+                        cursorIndex = starts[targetLine] + newOffset
+                    } else cursorIndex = text.length
                     if (!isShift) selectionStartIndex = cursorIndex
                     return true
                 }

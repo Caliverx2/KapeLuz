@@ -3920,6 +3920,9 @@ class KapeLuz : JPanel() {
                 // UI Tick - niezależny od stanu gry (działa w Menu, Pauzie i Grze)
                 modLoader.notifyTickUI()
 
+                // Zawsze procesuj pojedyncze wciśnięcia klawiszy (F6, ESC w menu, itp.)
+                processSingleInput()
+
                 val isMultiplayer = isHost || isMultiplayerClient
 
                 if (gameState == GameState.IN_GAME || (gameState == GameState.PAUSED && isMultiplayer)) {
@@ -3983,7 +3986,6 @@ class KapeLuz : JPanel() {
                         }
 
                         processInput()
-                        processSingleInput()
                         updateWorld()
 
                         // --- OBLICZANIE LOKALNEGO BODY YAW ---
@@ -4097,11 +4099,10 @@ class KapeLuz : JPanel() {
                     clearGrid()
                     render3D()
                     System.arraycopy(backBuffer, 0, pixels, 0, pixels.size)
-                } else if (gameState == GameState.PAUSED) {
-                    // When paused, we only process single key presses (for ESC)
-                    // and do nothing else for the game logic.
-                    processSingleInput()
-                    inputManager.resetFrameState() // Prevent mouse jump on unpause
+                } else {
+                    // W menu i stanach spoczynku resetujemy stan klatek i deltę
+                    inputManager.resetFrameState()
+                    delta = 0.0
                 }
 
                 frames++
@@ -5933,6 +5934,12 @@ class KapeLuz : JPanel() {
                     inputManager.captureMouse()
                     continue
                 }
+            }
+
+            // F6 - Pokazywanie/Ukrywanie przycisku edytora UI (ED)
+            if (keyCode == KeyEvent.VK_F6) {
+                println("Editor button visible: ${uiManager.isEditorButtonVisible}")
+                uiManager.isEditorButtonVisible = !uiManager.isEditorButtonVisible
             }
 
             if (keyCode == KeyEvent.VK_F9) changeDimension("overworld")

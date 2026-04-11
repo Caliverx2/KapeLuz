@@ -24,6 +24,18 @@ abstract class UIComponent {
     var isEnabled: Boolean = true
     var isFocused: Boolean = false
     var tooltipText: String? = null // Każdy komponent może mieć teraz tooltip
+    var isTemporary: Boolean = false
+    var initialX: Int = 0
+    var initialY: Int = 0
+    var initialW: Int = 0
+    var initialH: Int = 0
+
+    fun saveInitialState() {
+        initialX = x; initialY = y; initialW = width; initialH = height
+    }
+    fun restoreInitialState() {
+        x = initialX; y = initialY; width = initialW; height = initialH
+    }
 
     abstract fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int)
 
@@ -798,23 +810,140 @@ class UIInventory : UIComponent() {
 
 class UIManager(val game: KapeLuz) {
     val panels = mutableMapOf<GameState, UIPanel>()
+    var isEditorMode = false
+    var isEditorButtonVisible = false
+
+    private val editorToggleButton: UIButton = UIButton(game.uiReferenceWidth - 120, game.uiReferenceHeight - 60, 50, 50, "ED", tooltip = "UI Editor") {
+        toggleEditor()
+    }
+
+    private var selectedComponent: UIComponent? = null
+    private var isDragging = false
+    private var isResizingLeft = false
+    private var isResizingRight = false
+    private var isResizingTop = false
+    private var isResizingBottom = false
+    private var dragStartX = 0
+    private var dragStartY = 0
+    private var initialCompX = 0
+    private var initialCompY = 0
+    private var initialCompW = 0
+    private var initialCompH = 0
+
+    private val editorToolbar = mutableListOf<UIComponent>()
+    private var exportField: UITextField? = null
+    private var exportWindowVisible = false
 
     init {
         for (state in GameState.values()) {
             panels[state] = UIPanel()
+        }
+
+        // Narzędzie: Dodaj Przycisk (Lewy dół)
+        editorToolbar.add(UIButton(10, game.uiReferenceHeight - 60, 180, 50, "Add Button", fontSize = 24f) {
+            val currentPanel = panels[game.gameState]
+            if (currentPanel != null) {
+                val newBtn = UIButton(game.uiReferenceWidth / 2 - 100, game.uiReferenceHeight / 2 - 25, 200, 50, "New Button") {}
+                newBtn.isTemporary = true
+                newBtn.saveInitialState()
+                currentPanel.add(newBtn)
+            }
+        })
+
+        // Narzędzie: Export (Prawy góra)
+        editorToolbar.add(UIButton(game.uiReferenceWidth - 190, 10, 180, 50, "Export Code", fontSize = 24f) {
+            exportCode()
+        })
+
+        exportField = UITextField(game.uiReferenceWidth / 4, game.uiReferenceHeight / 4, game.uiReferenceWidth / 2, game.uiReferenceHeight / 2, "", "Generated Code:")
+    }
+
+    fun toggleEditor() {
+        isEditorMode = !isEditorMode
+        if (isEditorMode) {
+            panels.values.forEach { panel ->
+                panel.components.forEach { it.saveInitialState() }
+            }
+        } else {
+            panels.values.forEach { panel ->
+                panel.components.removeIf { it.isTemporary }
+                panel.components.forEach { it.restoreInitialState() }
+            }
+            exportWindowVisible = false
+            selectedComponent = null
+        }
+    }
+
+    private fun exportCode() {
+        val sb = StringBuilder()
+        val currentPanel = panels[game.gameState]
+        if (currentPanel != null) {
+            currentPanel.components.forEach { comp ->
+                if (comp is UIButton) {
+                    val xVal = comp.x
+                    val wVal = comp.width
+                    // Próba wykrycia centrowania dla ładniejszego kodu
+                    val xStr = if (kotlin.math.abs((xVal + wVal / 2) - game.uiReferenceWidth / 2) < 5) {
+                        "uiReferenceWidth/2 - ${wVal / 2}"
+                    } else {
+                        "$xVal"
+                    }
+                    sb.append("UIButton($xStr, ${comp.y}, $wVal, ${comp.height}, \"${comp.text}\")\n")
+                }
+            }
+        }
+        exportField?.text = sb.toString()
+        exportWindowVisible = true
+    }
+
+    private fun renderEditorUI(g: Graphics2D, mouseX: Int, mouseY: Int) {
+        g.color = Color(255, 0, 0, 100)
+        g.stroke = BasicStroke(2f)
+
+        // Podświetlenie wszystkich komponentów
+        panels[game.gameState]?.components?.forEach {
+            g.drawRect(it.x, it.y, it.width, it.height)
+        }
+
+        // Wybrany komponent
+        selectedComponent?.let {
+            g.color = Color.YELLOW
+            g.drawRect(it.x - 2, it.y - 2, it.width + 4, it.height + 4)
+        }
+
+        editorToolbar.forEach { it.render(g, game, mouseX, mouseY) }
+
+        if (exportWindowVisible) {
+            g.color = Color(0, 0, 0, 230)
+            g.fillRect(0, 0, game.uiReferenceWidth, game.uiReferenceHeight)
+            exportField?.render(g, game, mouseX, mouseY)
+            // Przycisk zamknięcia okna eksportu
+            g.color = Color.RED
+            g.fillRect(game.uiReferenceWidth * 3 / 4 - 30, game.uiReferenceHeight / 4 - 30, 30, 30)
+            g.color = Color.WHITE
+            g.drawString("X", game.uiReferenceWidth * 3 / 4 - 22, game.uiReferenceHeight / 4 - 8)
         }
     }
 
     fun getPanel(state: GameState): UIPanel = panels[state]!!
 
     fun render(g: Graphics2D, mouseX: Int, mouseY: Int) {
-        val currentPanel = panels[game.gameState] ?: return
+        val currentPanel = panels[game.gameState]
 
-        // 1. Rysowanie głównych komponentów
-        currentPanel.render(g, game, mouseX, mouseY)
+        // 1. Rysowanie głównych komponentów (tylko jeśli panel istnieje dla tego stanu)
+        currentPanel?.render(g, game, mouseX, mouseY)
 
         // 2. Rysowanie Tooltipów na wierzchu wszystkiego
-        renderTooltipLayer(g, currentPanel, mouseX, mouseY)
+        if (currentPanel != null) {
+            renderTooltipLayer(g, currentPanel, mouseX, mouseY)
+        }
+
+        // 3. Przycisk przełącznika (jeśli aktywowany F6)
+        if (isEditorButtonVisible) editorToggleButton.render(g, game, mouseX, mouseY)
+
+        if (isEditorMode) {
+            renderEditorUI(g, mouseX, mouseY)
+        }
     }
 
     private fun renderTooltipLayer(g: Graphics2D, panel: UIPanel, mouseX: Int, mouseY: Int) {
@@ -868,13 +997,134 @@ class UIManager(val game: KapeLuz) {
     }
 
     // Pozostałe metody delegujące bez zmian...
-    fun handleClick(x: Int, y: Int): Boolean = panels[game.gameState]?.handleClick(x, y) ?: false
-    fun handleHover(x: Int, y: Int) = panels[game.gameState]?.handleHover(x, y)
-    fun handleScroll(amount: Int) = panels[game.gameState]?.handleScroll(amount)
-    fun handlePress(x: Int, y: Int): Boolean = panels[game.gameState]?.handlePress(x, y) ?: false
-    fun handleRelease(x: Int, y: Int) = panels[game.gameState]?.handleRelease(x, y)
-    fun handleDrag(x: Int, y: Int) = panels[game.gameState]?.handleDrag(x, y)
-    fun handleKey(e: KeyEvent): Boolean = panels[game.gameState]?.handleKey(e) ?: false
+    fun handleClick(x: Int, y: Int): Boolean {
+        // Przycisk ED ma zawsze priorytet, jeśli jest widoczny
+        if (isEditorButtonVisible && editorToggleButton.onClick(x, y)) return true
+
+        if (isEditorMode) {
+            if (exportWindowVisible) {
+                if (x >= game.uiReferenceWidth * 3 / 4 - 30 && x <= game.uiReferenceWidth * 3 / 4 &&
+                    y >= game.uiReferenceHeight / 4 - 30 && y <= game.uiReferenceHeight / 4) {
+                    exportWindowVisible = false
+                    return true
+                }
+                return exportField?.onClick(x, y) ?: false
+            }
+            for (tool in editorToolbar) {
+                if (tool.onClick(x, y)) return true
+            }
+            
+            // W trybie edycji blokujemy standardowe kliknięcia komponentów panelu
+            return true
+        }
+        return panels[game.gameState]?.handleClick(x, y) ?: false
+    }
+
+    fun handleHover(x: Int, y: Int) {
+        if (isEditorButtonVisible) editorToggleButton.onHover(x, y)
+        if (isEditorMode) {
+            editorToolbar.forEach { it.onHover(x, y) }
+            if (exportWindowVisible) exportField?.onHover(x, y)
+        }
+        panels[game.gameState]?.handleHover(x, y)
+    }
+
+    fun handleScroll(amount: Int) {
+        if (isEditorMode && exportWindowVisible) exportField?.onScroll(amount)
+        panels[game.gameState]?.handleScroll(amount)
+    }
+
+    fun handlePress(x: Int, y: Int): Boolean {
+        if (isEditorButtonVisible && editorToggleButton.isMouseOver(x, y)) return editorToggleButton.onPress(x, y)
+
+        if (isEditorMode) {
+            if (exportWindowVisible) return exportField?.onPress(x, y) ?: false
+            
+            // Toolbar ma priorytet
+            for (tool in editorToolbar) if (tool.onPress(x, y)) return true
+
+            // Wybór komponentu do edycji
+            val panel = panels[game.gameState]
+            if (panel != null) {
+                for (comp in panel.components.asReversed()) {
+                    if (comp.isMouseOver(x, y)) {
+                        selectedComponent = comp
+                        dragStartX = x; dragStartY = y
+                        initialCompX = comp.x; initialCompY = comp.y
+                        initialCompW = comp.width; initialCompH = comp.height
+                        
+                        val margin = 15
+                        isResizingLeft = kotlin.math.abs(x - comp.x) < margin
+                        isResizingRight = kotlin.math.abs(x - (comp.x + comp.width)) < margin
+                        isResizingTop = kotlin.math.abs(y - comp.y) < margin
+                        isResizingBottom = kotlin.math.abs(y - (comp.y + comp.height)) < margin
+                        
+                        isDragging = !isResizingLeft && !isResizingRight && !isResizingTop && !isResizingBottom
+                        return true
+                    }
+                }
+            }
+            selectedComponent = null
+        }
+        return panels[game.gameState]?.handlePress(x, y) ?: false
+    }
+
+    fun handleRelease(x: Int, y: Int) {
+        if (isEditorButtonVisible) editorToggleButton.onRelease(x, y)
+        if (isEditorMode) {
+            isDragging = false
+            isResizingLeft = false; isResizingRight = false
+            isResizingTop = false; isResizingBottom = false
+            
+            editorToolbar.forEach { it.onRelease(x, y) }
+            if (exportWindowVisible) exportField?.onRelease(x, y)
+        }
+        panels[game.gameState]?.handleRelease(x, y)
+    }
+
+    fun handleDrag(x: Int, y: Int) {
+        if (isEditorButtonVisible) editorToggleButton.onDrag(x, y)
+        if (isEditorMode) {
+            if (exportWindowVisible) { exportField?.onDrag(x, y); return }
+            
+            selectedComponent?.let { comp ->
+                val dx = x - dragStartX
+                val dy = y - dragStartY
+                
+                if (isDragging) {
+                    comp.x = initialCompX + dx
+                    comp.y = initialCompY + dy
+                } else {
+                    // Skalowanie poziome
+                    if (isResizingLeft) {
+                        val maxDx = initialCompW - 20 // Nie pozwól zmniejszyć poniżej 20px
+                        val clampedDx = kotlin.math.min(dx, maxDx)
+                        comp.x = initialCompX + clampedDx
+                        comp.width = initialCompW - clampedDx
+                    } else if (isResizingRight) {
+                        comp.width = kotlin.math.max(20, initialCompW + dx)
+                    }
+
+                    // Skalowanie pionowe
+                    if (isResizingTop) {
+                        val maxDy = initialCompH - 20
+                        val clampedDy = kotlin.math.min(dy, maxDy)
+                        comp.y = initialCompY + clampedDy
+                        comp.height = initialCompH - clampedDy
+                    } else if (isResizingBottom) {
+                        comp.height = kotlin.math.max(20, initialCompH + dy)
+                    }
+                }
+            }
+            editorToolbar.forEach { it.onDrag(x, y) }
+        }
+        panels[game.gameState]?.handleDrag(x, y)
+    }
+
+    fun handleKey(e: KeyEvent): Boolean {
+        if (isEditorMode && exportWindowVisible) return exportField?.onKey(e) ?: false
+        return panels[game.gameState]?.handleKey(e) ?: false
+    }
 }
 
 class UIPanel {

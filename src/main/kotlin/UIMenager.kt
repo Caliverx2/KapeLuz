@@ -30,10 +30,10 @@ abstract class UIComponent {
     var initialW: Int = 0
     var initialH: Int = 0
 
-    fun saveInitialState() {
+    open fun saveInitialState() {
         initialX = x; initialY = y; initialW = width; initialH = height
     }
-    fun restoreInitialState() {
+    open fun restoreInitialState() {
         x = initialX; y = initialY; width = initialW; height = initialH
     }
 
@@ -68,12 +68,28 @@ class UIButton(
     var icon: BufferedImage? = null,
     var action: () -> Unit
 ) : UIComponent() {
+    var isEditingText = false
+    var cursorIndex = 0
+    var selectionStartIndex = 0
+    private var initialText: String = ""
+
     init {
         this.x = x
         this.y = y
         this.width = width
         this.height = height
         this.tooltipText = tooltip
+    }
+
+    override fun saveInitialState() {
+        super.saveInitialState()
+        initialText = text
+    }
+
+    override fun restoreInitialState() {
+        super.restoreInitialState()
+        text = initialText
+        isEditingText = false
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -87,6 +103,14 @@ class UIButton(
 
         texture?.let {
             g.drawImage(it, x, y, width, height, null)
+        }
+
+        // Podświetlenie tła podczas edycji tekstu
+        if (isEditingText) {
+            g.color = Color(255, 255, 255, 50)
+            g.fillRect(x, y, width, height)
+            g.color = Color.CYAN
+            g.drawRect(x, y, width, height)
         }
 
         // Rysowanie ikony świata (40x40)
@@ -107,7 +131,7 @@ class UIButton(
 
         val iconOffset = if (icon != null) height + 5 else 0
 
-        val drawX = when (textAlign) {
+        var drawX = when (textAlign) {
             TextAlign.LEFT   -> x + padding + iconOffset
             TextAlign.CENTER -> x + (width - textWidth) / 2
             TextAlign.RIGHT  -> x + width - textWidth - padding
@@ -115,7 +139,26 @@ class UIButton(
 
         val drawY = y + (height + textHeight) / 2 - 4
 
+        // Rysowanie zaznaczenia tekstu wewnątrz przycisku
+        if (isEditingText && selectionStartIndex != cursorIndex) {
+            val start = min(selectionStartIndex, cursorIndex)
+            val end = max(selectionStartIndex, cursorIndex)
+            val selX = drawX + fm.stringWidth(text.substring(0, start))
+            val selW = fm.stringWidth(text.substring(start, end))
+            g.color = Color(0, 120, 215, 150)
+            g.fillRect(selX, drawY - textHeight, selW, fm.height)
+        }
+
+        g.color = if (isEnabled) Color.WHITE else Color(0x808080)
         g.drawString(text, drawX, drawY)
+
+        // Rysowanie kursora podczas edycji
+        if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorPosX = drawX + fm.stringWidth(text.substring(0, cursorIndex))
+            g.color = Color.WHITE
+            g.fillRect(cursorPosX, drawY - textHeight, 2, fm.height)
+        }
+
         g.clip = oldClip
     }
 
@@ -123,6 +166,48 @@ class UIButton(
         if (isVisible && isEnabled && isMouseOver(clickX, clickY)) {
             action()
             return true
+        }
+        return false
+    }
+
+    override fun onKey(e: KeyEvent): Boolean {
+        if (!isEditingText) return false
+        if (e.id == KeyEvent.KEY_PRESSED) {
+            when (e.keyCode) {
+                KeyEvent.VK_ENTER, KeyEvent.VK_ESCAPE -> {
+                    isEditingText = false
+                    return true
+                }
+                KeyEvent.VK_BACK_SPACE -> {
+                    if (selectionStartIndex != cursorIndex) {
+                        val start = min(selectionStartIndex, cursorIndex)
+                        val end = max(selectionStartIndex, cursorIndex)
+                        text = text.removeRange(start, end)
+                        cursorIndex = start
+                        selectionStartIndex = cursorIndex
+                    } else if (cursorIndex > 0) {
+                        text = text.removeRange(cursorIndex - 1, cursorIndex)
+                        cursorIndex--
+                        selectionStartIndex = cursorIndex
+                    }
+                    return true
+                }
+            }
+        } else if (e.id == KeyEvent.KEY_TYPED) {
+            val char = e.keyChar
+            if (char.code >= 32 && char.code != 127) {
+                // Jeśli jest zaznaczenie, usuń je przed wpisaniem nowego znaku
+                if (selectionStartIndex != cursorIndex) {
+                    val start = min(selectionStartIndex, cursorIndex)
+                    val end = max(selectionStartIndex, cursorIndex)
+                    text = text.removeRange(start, end)
+                    cursorIndex = start
+                }
+                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
+                cursorIndex++
+                selectionStartIndex = cursorIndex
+                return true
+            }
         }
         return false
     }
@@ -874,8 +959,10 @@ class UIManager(val game: KapeLuz) {
     val panels = mutableMapOf<GameState, UIPanel>()
     var isEditorMode = false
     var isEditorButtonVisible = false
+    private var lastClickTime = 0L
+    private var lastClickedComponent: UIComponent? = null
 
-    private val editorToggleButton: UIButton = UIButton(game.uiReferenceWidth - 120, game.uiReferenceHeight - 60, 50, 50, "ED", tooltip = "UI Editor") {
+    private val editorToggleButton: UIButton = UIButton(15, 15, 50, 50, "ED", tooltip = "UI Editor") {
         toggleEditor()
     }
 
@@ -902,7 +989,7 @@ class UIManager(val game: KapeLuz) {
         }
 
         // Narzędzie: Dodaj Przycisk (Lewy dół)
-        editorToolbar.add(UIButton(10, game.uiReferenceHeight - 60, 180, 50, "Add Button", fontSize = 24f) {
+        editorToolbar.add(UIButton(80, 15, 130, 50, "Add Button", fontSize = 24f) {
             val currentPanel = panels[game.gameState]
             if (currentPanel != null) {
                 val newBtn = UIButton(game.uiReferenceWidth / 2 - 100, game.uiReferenceHeight / 2 - 25, 200, 50, "New Button") {}
@@ -932,6 +1019,9 @@ class UIManager(val game: KapeLuz) {
                 panel.components.forEach { it.restoreInitialState() }
             }
             exportWindowVisible = false
+            if (selectedComponent is UIButton) {
+                (selectedComponent as UIButton).isEditingText = false
+            }
             selectedComponent = null
         }
     }
@@ -959,18 +1049,43 @@ class UIManager(val game: KapeLuz) {
     }
 
     private fun renderEditorUI(g: Graphics2D, mouseX: Int, mouseY: Int) {
-        g.color = Color(255, 0, 0, 100)
-        g.stroke = BasicStroke(2f)
+        val panel = panels[game.gameState] ?: return
+        
+        for (comp in panel.components) {
+            val isSelected = comp == selectedComponent
+            val isHovered = comp.isMouseOver(mouseX, mouseY)
 
-        // Podświetlenie wszystkich komponentów
-        panels[game.gameState]?.components?.forEach {
-            g.drawRect(it.x, it.y, it.width, it.height)
-        }
+            if (isSelected || isHovered) {
+                g.color = if (isSelected) Color.YELLOW else Color(255, 255, 255, 150)
+                g.stroke = BasicStroke(if (isSelected) 2f else 1f)
+                g.drawRect(comp.x - 1, comp.y - 1, comp.width + 2, comp.height + 2)
 
-        // Wybrany komponent
-        selectedComponent?.let {
-            g.color = Color.YELLOW
-            g.drawRect(it.x - 2, it.y - 2, it.width + 4, it.height + 4)
+                // Rysowanie uchwytów (handles) na rogach i krawędziach
+                val hSize = 8
+                val hOffset = hSize / 2
+                val corners = arrayOf(
+                    Point(comp.x, comp.y), // TL
+                    Point(comp.x + comp.width, comp.y), // TR
+                    Point(comp.x, comp.y + comp.height), // BL
+                    Point(comp.x + comp.width, comp.y + comp.height), // BR
+                    Point(comp.x + comp.width / 2, comp.y), // T
+                    Point(comp.x + comp.width / 2, comp.y + comp.height), // B
+                    Point(comp.x, comp.y + comp.height / 2), // L
+                    Point(comp.x + comp.width, comp.y + comp.height / 2) // R
+                )
+
+                g.color = if (isSelected) Color.YELLOW else Color.WHITE
+                for (p in corners) {
+                    g.fillRect(p.x - hOffset, p.y - hOffset, hSize, hSize)
+                    g.color = Color.BLACK
+                    g.drawRect(p.x - hOffset, p.y - hOffset, hSize, hSize)
+                    g.color = if (isSelected) Color.YELLOW else Color.WHITE
+                }
+            } else {
+                g.color = Color(255, 0, 0, 50)
+                g.stroke = BasicStroke(1f)
+                g.drawRect(comp.x, comp.y, comp.width, comp.height)
+            }
         }
 
         editorToolbar.forEach { it.render(g, game, mouseX, mouseY) }
@@ -1105,30 +1220,85 @@ class UIManager(val game: KapeLuz) {
             // Toolbar ma priorytet
             for (tool in editorToolbar) if (tool.onPress(x, y)) return true
 
-            // Wybór komponentu do edycji
             val panel = panels[game.gameState]
             if (panel != null) {
+                val margin = 15
+
+                // 1. PRIORYTET: Sprawdź najpierw aktualnie zaznaczony komponent (aby nie złapać sąsiada)
+                selectedComponent?.let { comp ->
+                    val isNear = x >= comp.x - margin && x <= comp.x + comp.width + margin &&
+                                 y >= comp.y - margin && y <= comp.y + comp.height + margin
+                    if (isNear) {
+                        performComponentSelection(comp, x, y, margin)
+                        return true
+                    }
+                }
+
+                // 2. Jeśli nie trafiono w zaznaczony, szukaj nowego w reszcie komponentów
                 for (comp in panel.components.asReversed()) {
-                    if (comp.isMouseOver(x, y)) {
-                        selectedComponent = comp
-                        dragStartX = x; dragStartY = y
-                        initialCompX = comp.x; initialCompY = comp.y
-                        initialCompW = comp.width; initialCompH = comp.height
-                        
-                        val margin = 15
-                        isResizingLeft = kotlin.math.abs(x - comp.x) < margin
-                        isResizingRight = kotlin.math.abs(x - (comp.x + comp.width)) < margin
-                        isResizingTop = kotlin.math.abs(y - comp.y) < margin
-                        isResizingBottom = kotlin.math.abs(y - (comp.y + comp.height)) < margin
-                        
-                        isDragging = !isResizingLeft && !isResizingRight && !isResizingTop && !isResizingBottom
+                    if (comp == selectedComponent) continue
+
+                    val isNear = x >= comp.x - margin && x <= comp.x + comp.width + margin &&
+                                 y >= comp.y - margin && y <= comp.y + comp.height + margin
+
+                    if (isNear) {
+                        performComponentSelection(comp, x, y, margin)
                         return true
                     }
                 }
             }
+            
+            if (selectedComponent is UIButton && (selectedComponent as UIButton).isEditingText) {
+                (selectedComponent as UIButton).isEditingText = false
+            }
             selectedComponent = null
         }
         return panels[game.gameState]?.handlePress(x, y) ?: false
+    }
+
+    private fun performComponentSelection(comp: UIComponent, x: Int, y: Int, margin: Int) {
+        val currentTime = System.currentTimeMillis()
+        val isDoubleClick = (currentTime - lastClickTime < 300) && (lastClickedComponent == comp)
+        lastClickTime = currentTime
+        lastClickedComponent = comp
+
+        // Jeśli zmieniamy zaznaczenie, wyłącz tryb edycji tekstu na starym komponencie
+        if (selectedComponent is UIButton && selectedComponent != comp) {
+            (selectedComponent as UIButton).isEditingText = false
+        }
+
+        // Przenieś komponent na sam wierzch warstwy (na koniec listy)
+        panels[game.gameState]?.components?.let { components ->
+            // Sprawdzamy czy już nie jest na górze, aby nie robić zbędnych operacji
+            if (components.isNotEmpty() && components.last() != comp) {
+                if (components.remove(comp)) {
+                    components.add(comp)
+                }
+            }
+        }
+
+        if (isDoubleClick && comp is UIButton) {
+            comp.isEditingText = true
+            comp.cursorIndex = comp.text.length
+            // Jeśli to domyślny przycisk, zaznaczamy całość. W innym przypadku tylko kursor na koniec.
+            if (comp.text == "New Button") {
+                comp.selectionStartIndex = 0
+            } else {
+                comp.selectionStartIndex = comp.cursorIndex
+            }
+        }
+
+        selectedComponent = comp
+        dragStartX = x; dragStartY = y
+        initialCompX = comp.x; initialCompY = comp.y
+        initialCompW = comp.width; initialCompH = comp.height
+
+        isResizingLeft = kotlin.math.abs(x - comp.x) < margin
+        isResizingRight = kotlin.math.abs(x - (comp.x + comp.width)) < margin
+        isResizingTop = kotlin.math.abs(y - comp.y) < margin
+        isResizingBottom = kotlin.math.abs(y - (comp.y + comp.height)) < margin
+
+        isDragging = !isResizingLeft && !isResizingRight && !isResizingTop && !isResizingBottom
     }
 
     fun handleRelease(x: Int, y: Int) {
@@ -1184,7 +1354,11 @@ class UIManager(val game: KapeLuz) {
     }
 
     fun handleKey(e: KeyEvent): Boolean {
-        if (isEditorMode && exportWindowVisible) return exportField?.onKey(e) ?: false
+        if (isEditorMode) {
+            if (exportWindowVisible) return exportField?.onKey(e) ?: false
+            // Jeśli edytujemy tekst w wybranym komponencie
+            if (selectedComponent?.onKey(e) == true) return true
+        }
         return panels[game.gameState]?.handleKey(e) ?: false
     }
 }

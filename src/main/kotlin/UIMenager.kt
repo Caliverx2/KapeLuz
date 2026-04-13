@@ -60,6 +60,7 @@ enum class TextAlign {
 class UIButton(
     x: Int, y: Int, width: Int, height: Int,
     var text: String = "Button",
+    var textColor: Color = Color.WHITE,
     var texture: BufferedImage? = null,
     var textAlign: TextAlign = TextAlign.CENTER,
     var padding: Int = 0,
@@ -72,6 +73,7 @@ class UIButton(
     var cursorIndex = 0
     var selectionStartIndex = 0
     private var initialText: String = ""
+    private var initialTextColor: Color = Color.WHITE
 
     init {
         this.x = x
@@ -84,11 +86,13 @@ class UIButton(
     override fun saveInitialState() {
         super.saveInitialState()
         initialText = text
+        initialTextColor = textColor
     }
 
     override fun restoreInitialState() {
         super.restoreInitialState()
         text = initialText
+        textColor = initialTextColor
         isEditingText = false
     }
 
@@ -149,7 +153,7 @@ class UIButton(
             g.fillRect(selX, drawY - textHeight, selW, fm.height)
         }
 
-        g.color = if (isEnabled) Color.WHITE else Color(0x808080)
+        g.color = if (isEnabled) textColor else Color(0x808080)
         g.drawString(text, drawX, drawY)
 
         // Rysowanie kursora podczas edycji
@@ -238,7 +242,8 @@ class UIText(
 class UITextField(
     x: Int, y: Int, width: Int, height: Int,
     text: String = "",
-    var placeholder: String = ""
+    var placeholder: String = "",
+    var textColor: Color = Color.WHITE
 ) : UIComponent() {
     var text: String = text
         set(value) {
@@ -372,7 +377,7 @@ class UITextField(
                 }
             }
 
-            g.color = Color.WHITE
+            g.color = textColor
             g.drawString(lineText, x + padding - renderScrollOffset, currentLineY)
             currentLineY += fm.height
         }
@@ -1040,7 +1045,12 @@ class UIManager(val game: KapeLuz) {
                     } else {
                         "$xVal"
                     }
-                    sb.append("UIButton($xStr, ${comp.y}, $wVal, ${comp.height}, \"${comp.text}\")\n")
+                    val colorStr = if (comp.textColor != Color.WHITE) {
+                        ", textColor = Color(${comp.textColor.red}, ${comp.textColor.green}, ${comp.textColor.blue})"
+                    } else {
+                        ""
+                    }
+                    sb.append("UIButton($xStr, ${comp.y}, $wVal, ${comp.height}, \"${comp.text}\"$colorStr)\n")
                 }
             }
         }

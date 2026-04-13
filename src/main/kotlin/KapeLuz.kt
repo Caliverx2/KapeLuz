@@ -645,7 +645,7 @@ class KapeLuz : JPanel() {
         val iconStream = javaClass.getResourceAsStream("/iconsGUI/reload.png")
         val iconRefresh = if (iconStream != null) ImageIO.read(iconStream) else null
 
-        mainMenu.add(UIButton(uiReferenceWidth - 60, uiReferenceHeight - 60, 50, 50, "", iconRefresh, tooltip = "Reload Mods") {
+        mainMenu.add(UIButton(uiReferenceWidth - 60, uiReferenceHeight - 60, 50, 50, "", icon = iconRefresh, tooltip = "Reload Mods") {
             println("Reloading mods...")
             modLoader = ModLoader(this, gameDir)
             modLoader.loadMods()
@@ -817,9 +817,40 @@ class KapeLuz : JPanel() {
             options.add(UIBackground(Color(30, 30, 30)))
         }
 
-        options.add(UIButton(uiReferenceWidth/2 - 200 - 10, uiReferenceHeight/2 - 130, 420, 50, "Done") {
+        options.add(UIButton(15, 15, 50, 50, "<-") {
             gameState = previousGameState
         })
+
+        val scrollPanel = UIScrollPanel(6, 80, 400, 470)
+
+        scrollPanel.addChild(UIButton(10, 50*0, 380, 41, " Accessiblility", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Accessiblility", fontSize = 30f) {
+            println("   Accessiblility")
+        })
+        scrollPanel.addChild(UIButton(10, 50*1-10, 380, 41, "Controls", textAlign = TextAlign.LEFT, padding = 10, fontSize = 25f, textColor = Color(207,208,210)) {
+            println("Controls")
+        })
+        scrollPanel.addChild(UIButton(10, 50*2-20, 380, 41, " KeyBoard & Mouse", textAlign = TextAlign.LEFT, padding = 10, tooltip = "KeyBoard & Mouse", fontSize = 30f) {
+            println("   KeyBoard & Mouse")
+        })
+        scrollPanel.addChild(UIButton(10, 50*3-30, 380, 41, "General", textAlign = TextAlign.LEFT, padding = 10, fontSize = 25f, textColor = Color(207,208,210)) {
+            println("General")
+        })
+        scrollPanel.addChild(UIButton(10, 50*4-40, 380, 41, " General", textAlign = TextAlign.LEFT, padding = 10, tooltip = "General", fontSize = 30f) {
+            println("   General")
+        })
+        scrollPanel.addChild(UIButton(10, 50*5-50, 380, 41, " Video", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Video", fontSize = 30f) {
+            println("   Video")
+        })
+        scrollPanel.addChild(UIButton(10, 50*6-60, 380, 41, " Audio", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Audio", fontSize = 30f) {
+            println("   Audio")
+        })
+        scrollPanel.addChild(UIButton(10, 50*7-70, 380, 41, " Global Resources", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Global Resources", fontSize = 30f) {
+            println("   Global Resources")
+        })
+        scrollPanel.addChild(UIButton(10, 50*8-80, 380, 41, " Language", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Language", fontSize = 30f) {
+            println("   Language")
+        })
+        options.add(scrollPanel)
     }
 
     private fun updateWorldList() {

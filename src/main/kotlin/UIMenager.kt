@@ -222,11 +222,34 @@ class UIText(
     var text: String,
     var fontSize: Float,
     var color: Color,
-    var centered: Boolean = false
+    var centered: Boolean = false,
+    tooltip: String? = null
 ) : UIComponent() {
+    var isEditingText = false
+    var cursorIndex = 0
+    var selectionStartIndex = 0
+    private var initialText: String = ""
+    private var initialColor: Color = Color.WHITE
+
     init {
         this.x = x
         this.y = y
+        this.tooltipText = tooltip
+        this.initialText = text
+        this.initialColor = color
+    }
+
+    override fun saveInitialState() {
+        super.saveInitialState()
+        initialText = text
+        initialColor = color
+    }
+
+    override fun restoreInitialState() {
+        super.restoreInitialState()
+        text = initialText
+        color = initialColor
+        isEditingText = false
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -234,8 +257,67 @@ class UIText(
         g.font = game.fpsFont.deriveFont(fontSize)
         g.color = color
         val fm = g.fontMetrics
-        val drawX = if (centered) x - fm.stringWidth(text) / 2 else x
-        g.drawString(text, drawX, y + fm.ascent)
+
+        val textWidth = fm.stringWidth(text)
+        val textHeight = fm.ascent
+        val drawX = if (centered) x - textWidth / 2 else x
+        val drawY = y + textHeight
+
+        // Rysowanie zaznaczenia
+        if (isEditingText && selectionStartIndex != cursorIndex) {
+            val start = min(selectionStartIndex, cursorIndex)
+            val end = max(selectionStartIndex, cursorIndex)
+            val selX = drawX + fm.stringWidth(text.substring(0, start))
+            val selW = fm.stringWidth(text.substring(start, end))
+            g.color = Color(0, 120, 215, 150)
+            g.fillRect(selX, drawY - textHeight, selW, fm.height)
+        }
+
+        g.color = color
+        g.drawString(text, drawX, drawY)
+
+        // Rysowanie kursora
+        if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorPosX = drawX + fm.stringWidth(text.substring(0, cursorIndex))
+            g.color = Color.WHITE
+            g.fillRect(cursorPosX, drawY - textHeight, 2, fm.height)
+        }
+    }
+
+    override fun onKey(e: KeyEvent): Boolean {
+        if (!isEditingText) return false
+        if (e.id == KeyEvent.KEY_PRESSED) {
+            when (e.keyCode) {
+                KeyEvent.VK_ENTER, KeyEvent.VK_ESCAPE -> { isEditingText = false; return true }
+                KeyEvent.VK_BACK_SPACE -> {
+                    if (selectionStartIndex != cursorIndex) {
+                        val start = min(selectionStartIndex, cursorIndex)
+                        val end = max(selectionStartIndex, cursorIndex)
+                        text = text.removeRange(start, end)
+                        cursorIndex = start
+                        selectionStartIndex = cursorIndex
+                    } else if (cursorIndex > 0) {
+                        text = text.removeRange(cursorIndex - 1, cursorIndex)
+                        cursorIndex--; selectionStartIndex = cursorIndex
+                    }
+                    return true
+                }
+            }
+        } else if (e.id == KeyEvent.KEY_TYPED) {
+            val char = e.keyChar
+            if (char.code >= 32 && char.code != 127) {
+                if (selectionStartIndex != cursorIndex) {
+                    val start = min(selectionStartIndex, cursorIndex)
+                    val end = max(selectionStartIndex, cursorIndex)
+                    text = text.removeRange(start, end)
+                    cursorIndex = start
+                }
+                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
+                cursorIndex++; selectionStartIndex = cursorIndex
+                return true
+            }
+        }
+        return false
     }
 }
 
@@ -253,8 +335,8 @@ class UITextField(
             if (selectionStartIndex > field.length) selectionStartIndex = field.length
         }
 
-    private var cursorIndex = this.text.length
-    private var selectionStartIndex = this.text.length
+    var cursorIndex = this.text.length
+    var selectionStartIndex = this.text.length
     private val padding = 10
     private var lastFontMetrics: FontMetrics? = null
     private var targetScrollOffset = 0
@@ -984,7 +1066,14 @@ class UIManager(val game: KapeLuz) {
     private var initialCompW = 0
     private var initialCompH = 0
 
+    private var contextMenuVisible = false
+    private var contextMenuX = 0
+    private var contextMenuY = 0
+    private var spawnX = 0
+    private var spawnY = 0
+
     private val editorToolbar = mutableListOf<UIComponent>()
+    private val contextMenuButtons = mutableListOf<UIButton>()
     private var exportField: UITextField? = null
     private var exportWindowVisible = false
 
@@ -993,23 +1082,38 @@ class UIManager(val game: KapeLuz) {
             panels[state] = UIPanel()
         }
 
-        // Narzędzie: Dodaj Przycisk (Lewy dół)
-        editorToolbar.add(UIButton(80, 15, 130, 50, "Add Button", fontSize = 24f) {
-            val currentPanel = panels[game.gameState]
-            if (currentPanel != null) {
-                val newBtn = UIButton(game.uiReferenceWidth / 2 - 100, game.uiReferenceHeight / 2 - 25, 200, 50, "New Button") {}
-                newBtn.isTemporary = true
-                newBtn.saveInitialState()
-                currentPanel.add(newBtn)
-            }
-        })
-
         // Narzędzie: Export (Prawy góra)
         editorToolbar.add(UIButton(game.uiReferenceWidth - 190, 10, 180, 50, "Export Code", fontSize = 24f) {
             exportCode()
         })
 
         exportField = UITextField(game.uiReferenceWidth / 4, game.uiReferenceHeight / 4, game.uiReferenceWidth / 2, game.uiReferenceHeight / 2, "", "Generated Code:")
+
+        // Przyciski Menu Kontekstowego
+        val btnW = 150
+        val btnH = 40
+        contextMenuButtons.add(UIButton(0, 0, btnW, btnH, "Add Button", fontSize = 20f) {
+            addNewComponent(UIButton(spawnX, spawnY, 200, 50, "New Button") {})
+            contextMenuVisible = false
+        })
+        contextMenuButtons.add(UIButton(0, btnH, btnW, btnH, "Add Input", fontSize = 20f) {
+            addNewComponent(UITextField(spawnX, spawnY, 200, 40, "Text...", "Enter text..."))
+            contextMenuVisible = false
+        })
+        contextMenuButtons.add(UIButton(0, btnH * 2, btnW, btnH, "Add Text", fontSize = 20f) {
+            addNewComponent(UIText(spawnX, spawnY, "New Text", 24f, Color.WHITE))
+            contextMenuVisible = false
+        })
+    }
+
+    private fun addNewComponent(comp: UIComponent) {
+        val currentPanel = panels[game.gameState]
+        if (currentPanel != null) {
+            comp.isTemporary = true
+            comp.saveInitialState()
+            currentPanel.add(comp)
+            selectedComponent = comp // Od razu zaznacz nowo postawiony obiekt
+        }
     }
 
     fun toggleEditor() {
@@ -1024,6 +1128,7 @@ class UIManager(val game: KapeLuz) {
                 panel.components.forEach { it.restoreInitialState() }
             }
             exportWindowVisible = false
+            contextMenuVisible = false
             if (selectedComponent is UIButton) {
                 (selectedComponent as UIButton).isEditingText = false
             }
@@ -1037,25 +1142,32 @@ class UIManager(val game: KapeLuz) {
         if (currentPanel != null) {
             currentPanel.components.forEach { comp ->
                 if (comp is UIButton) {
-                    val xVal = comp.x
-                    val wVal = comp.width
-                    // Próba wykrycia centrowania dla ładniejszego kodu
-                    val xStr = if (kotlin.math.abs((xVal + wVal / 2) - game.uiReferenceWidth / 2) < 5) {
-                        "uiReferenceWidth/2 - ${wVal / 2}"
-                    } else {
-                        "$xVal"
-                    }
-                    val colorStr = if (comp.textColor != Color.WHITE) {
-                        ", textColor = Color(${comp.textColor.red}, ${comp.textColor.green}, ${comp.textColor.blue})"
-                    } else {
-                        ""
-                    }
-                    sb.append("UIButton($xStr, ${comp.y}, $wVal, ${comp.height}, \"${comp.text}\"$colorStr)\n")
+                    sb.append(exportButtonCode(comp))
+                } else if (comp is UIText) {
+                    sb.append("UIText(${comp.x}, ${comp.y}, \"${comp.text}\", ${comp.fontSize}f, Color(${comp.color.red}, ${comp.color.green}, ${comp.color.blue}), centered = ${comp.centered})\n")
+                } else if (comp is UITextField) {
+                    sb.append("UITextField(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", \"${comp.placeholder}\")\n")
                 }
             }
         }
         exportField?.text = sb.toString()
         exportWindowVisible = true
+    }
+
+    private fun exportButtonCode(comp: UIButton): String {
+        val xVal = comp.x
+        val wVal = comp.width
+        val xStr = if (kotlin.math.abs((xVal + wVal / 2) - game.uiReferenceWidth / 2) < 5) {
+            "uiReferenceWidth/2 - ${wVal / 2}"
+        } else {
+            "$xVal"
+        }
+        val colorStr = if (comp.textColor != Color.WHITE) {
+            ", textColor = Color(${comp.textColor.red}, ${comp.textColor.green}, ${comp.textColor.blue})"
+        } else {
+            ""
+        }
+        return "UIButton($xStr, ${comp.y}, $wVal, ${comp.height}, \"${comp.text}\"$colorStr) { }\n"
     }
 
     private fun renderEditorUI(g: Graphics2D, mouseX: Int, mouseY: Int) {
@@ -1099,6 +1211,14 @@ class UIManager(val game: KapeLuz) {
         }
 
         editorToolbar.forEach { it.render(g, game, mouseX, mouseY) }
+
+        if (contextMenuVisible) {
+            g.translate(contextMenuX, contextMenuY)
+            contextMenuButtons.forEach { it.render(g, game, mouseX - contextMenuX, mouseY - contextMenuY) }
+            g.color = Color.WHITE
+            g.drawRect(0, 0, 150, contextMenuButtons.size * 40)
+            g.translate(-contextMenuX, -contextMenuY)
+        }
 
         if (exportWindowVisible) {
             g.color = Color(0, 0, 0, 230)
@@ -1189,6 +1309,13 @@ class UIManager(val game: KapeLuz) {
         if (isEditorButtonVisible && editorToggleButton.onClick(x, y)) return true
 
         if (isEditorMode) {
+            if (contextMenuVisible) {
+                for (btn in contextMenuButtons) {
+                    if (btn.onClick(x - contextMenuX, y - contextMenuY)) return true
+                }
+                contextMenuVisible = false // Zamknij menu jeśli kliknięto obok
+            }
+
             if (exportWindowVisible) {
                 if (x >= game.uiReferenceWidth * 3 / 4 - 30 && x <= game.uiReferenceWidth * 3 / 4 &&
                     y >= game.uiReferenceHeight / 4 - 30 && y <= game.uiReferenceHeight / 4) {
@@ -1210,6 +1337,7 @@ class UIManager(val game: KapeLuz) {
     fun handleHover(x: Int, y: Int) {
         if (isEditorButtonVisible) editorToggleButton.onHover(x, y)
         if (isEditorMode) {
+            if (contextMenuVisible) contextMenuButtons.forEach { it.onHover(x - contextMenuX, y - contextMenuY) }
             editorToolbar.forEach { it.onHover(x, y) }
             if (exportWindowVisible) exportField?.onHover(x, y)
         }
@@ -1225,6 +1353,22 @@ class UIManager(val game: KapeLuz) {
         if (isEditorButtonVisible && editorToggleButton.isMouseOver(x, y)) return editorToggleButton.onPress(x, y)
 
         if (isEditorMode) {
+            // Obsługa prawego przycisku myszy (Otwieranie Context Menu)
+            if (game.inputManager.isRightMouseDown) {
+                contextMenuVisible = true
+                contextMenuX = x
+                contextMenuY = y
+                // Zabezpieczenie by menu nie wyszło poza ekran
+                if (contextMenuX + 150 > game.uiReferenceWidth) contextMenuX -= 150
+                if (contextMenuY + 120 > game.uiReferenceHeight) contextMenuY -= 120
+                
+                spawnX = x
+                spawnY = y
+                return true
+            }
+
+            if (contextMenuVisible) return false // Blokuj inne akcje gdy menu jest otwarte
+
             if (exportWindowVisible) return exportField?.onPress(x, y) ?: false
             
             // Toolbar ma priorytet
@@ -1258,8 +1402,11 @@ class UIManager(val game: KapeLuz) {
                 }
             }
             
-            if (selectedComponent is UIButton && (selectedComponent as UIButton).isEditingText) {
-                (selectedComponent as UIButton).isEditingText = false
+            // Kliknięcie w puste miejsce - zdejmij fokus/edycję z poprzedniego komponentu
+            when (val old = selectedComponent) {
+                is UIButton -> old.isEditingText = false
+                is UIText -> old.isEditingText = false
+                is UITextField -> old.isFocused = false
             }
             selectedComponent = null
         }
@@ -1273,28 +1420,34 @@ class UIManager(val game: KapeLuz) {
         lastClickedComponent = comp
 
         // Jeśli zmieniamy zaznaczenie, wyłącz tryb edycji tekstu na starym komponencie
-        if (selectedComponent is UIButton && selectedComponent != comp) {
-            (selectedComponent as UIButton).isEditingText = false
-        }
-
-        // Przenieś komponent na sam wierzch warstwy (na koniec listy)
-        panels[game.gameState]?.components?.let { components ->
-            // Sprawdzamy czy już nie jest na górze, aby nie robić zbędnych operacji
-            if (components.isNotEmpty() && components.last() != comp) {
-                if (components.remove(comp)) {
-                    components.add(comp)
-                }
+        if (selectedComponent != comp) {
+            when (val old = selectedComponent) {
+                is UIButton -> old.isEditingText = false
+                is UIText -> old.isEditingText = false
+                is UITextField -> old.isFocused = false
             }
         }
 
-        if (isDoubleClick && comp is UIButton) {
-            comp.isEditingText = true
-            comp.cursorIndex = comp.text.length
-            // Jeśli to domyślny przycisk, zaznaczamy całość. W innym przypadku tylko kursor na koniec.
-            if (comp.text == "New Button") {
-                comp.selectionStartIndex = 0
-            } else {
-                comp.selectionStartIndex = comp.cursorIndex
+        // Przenieś komponent na sam wierzch warstwy (na koniec listy)
+        moveComponentToFront(comp)
+
+        if (isDoubleClick) {
+            when (comp) {
+                is UIButton -> {
+                    comp.isEditingText = true
+                    comp.cursorIndex = comp.text.length
+                    comp.selectionStartIndex = if (comp.text == "New Button") 0 else comp.cursorIndex
+                }
+                is UIText -> {
+                    comp.isEditingText = true
+                    comp.cursorIndex = comp.text.length
+                    comp.selectionStartIndex = if (comp.text == "New Text") 0 else comp.cursorIndex
+                }
+                is UITextField -> {
+                    comp.isFocused = true
+                    comp.selectionStartIndex = 0
+                    comp.cursorIndex = comp.text.length
+                }
             }
         }
 
@@ -1309,6 +1462,16 @@ class UIManager(val game: KapeLuz) {
         isResizingBottom = kotlin.math.abs(y - (comp.y + comp.height)) < margin
 
         isDragging = !isResizingLeft && !isResizingRight && !isResizingTop && !isResizingBottom
+    }
+
+    private fun moveComponentToFront(comp: UIComponent) {
+        panels[game.gameState]?.components?.let { components ->
+            if (components.isNotEmpty() && components.last() != comp) {
+                if (components.remove(comp)) {
+                    components.add(comp)
+                }
+            }
+        }
     }
 
     fun handleRelease(x: Int, y: Int) {

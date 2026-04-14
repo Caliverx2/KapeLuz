@@ -559,7 +559,9 @@ class KapeLuz : JPanel() {
             }
 
             override fun mouseClicked(e: java.awt.event.MouseEvent) {
-                handleMenuClick(transform(e))
+                if (SwingUtilities.isLeftMouseButton(e)) {
+                    handleMenuClick(transform(e))
+                }
             }
 
             override fun mouseMoved(e: java.awt.event.MouseEvent) {

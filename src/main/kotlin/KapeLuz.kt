@@ -826,31 +826,31 @@ class KapeLuz : JPanel() {
         val scrollPanel = UIScrollPanel(6, 80, 400, 470)
 
         scrollPanel.addChild(UIButton(10, 50*0, 380, 41, " Accessiblility", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Accessiblility", fontSize = 30f) {
-            println("   Accessiblility")
+            println("page: Accessiblility")
         })
         scrollPanel.addChild(UIButton(10, 50*1-10, 380, 41, "Controls", textAlign = TextAlign.LEFT, padding = 10, fontSize = 25f, textColor = Color(207,208,210)) {
-            println("Controls")
+            println("part: Controls")
         })
         scrollPanel.addChild(UIButton(10, 50*2-20, 380, 41, " KeyBoard & Mouse", textAlign = TextAlign.LEFT, padding = 10, tooltip = "KeyBoard & Mouse", fontSize = 30f) {
-            println("   KeyBoard & Mouse")
+            println("page: KeyBoard & Mouse")
         })
         scrollPanel.addChild(UIButton(10, 50*3-30, 380, 41, "General", textAlign = TextAlign.LEFT, padding = 10, fontSize = 25f, textColor = Color(207,208,210)) {
-            println("General")
+            println("part: General")
         })
         scrollPanel.addChild(UIButton(10, 50*4-40, 380, 41, " General", textAlign = TextAlign.LEFT, padding = 10, tooltip = "General", fontSize = 30f) {
-            println("   General")
+            println("page: General")
         })
         scrollPanel.addChild(UIButton(10, 50*5-50, 380, 41, " Video", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Video", fontSize = 30f) {
-            println("   Video")
+            println("page: Video")
         })
         scrollPanel.addChild(UIButton(10, 50*6-60, 380, 41, " Audio", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Audio", fontSize = 30f) {
-            println("   Audio")
+            println("page: Audio")
         })
         scrollPanel.addChild(UIButton(10, 50*7-70, 380, 41, " Global Resources", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Global Resources", fontSize = 30f) {
-            println("   Global Resources")
+            println("page: Global Resources")
         })
         scrollPanel.addChild(UIButton(10, 50*8-80, 380, 41, " Language", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Language", fontSize = 30f) {
-            println("   Language")
+            println("page: Language")
         })
         options.add(scrollPanel)
     }

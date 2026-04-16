@@ -820,7 +820,7 @@ class KapeLuz : JPanel() {
         }
 
         options.add(UIButton(15, 15, 50, 50, "<-") {
-            gameState = previousGameState
+            gameState = previousGameState //dzien dobry w tym ładnym dzień dobry w małej dzień dobry w domu
         })
 
         val scrollPanel = UIScrollPanel(6, 80, 400, 470)

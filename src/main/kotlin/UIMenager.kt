@@ -11,6 +11,7 @@ import kotlin.math.max
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.min
 import kotlin.math.floor
 import java.lang.management.ManagementFactory
 import java.lang.management.BufferPoolMXBean
@@ -325,7 +326,9 @@ class UITextField(
     x: Int, y: Int, width: Int, height: Int,
     text: String = "",
     var placeholder: String = "",
-    var textColor: Color = Color.WHITE
+    var textColor: Color = Color.WHITE,
+    var fontSize: Float = 32f,
+    var onTextChanged: ((String) -> Unit)? = null
 ) : UIComponent() {
     var text: String = text
         set(value) {
@@ -333,6 +336,7 @@ class UITextField(
             // Zabezpieczenie indeksów przy zmianie tekstu z zewnątrz
             if (cursorIndex > field.length) cursorIndex = field.length
             if (selectionStartIndex > field.length) selectionStartIndex = field.length
+            onTextChanged?.invoke(field)
         }
 
     var cursorIndex = this.text.length
@@ -388,7 +392,7 @@ class UITextField(
         // W oryginalnym kodzie placeholder był rysowany nad polem (y-5), więc zachowujemy to.
         if (placeholder.isNotEmpty()) {
             g.color = Color.LIGHT_GRAY
-            g.font = game.fpsFont.deriveFont(32f)
+            g.font = game.fpsFont.deriveFont(fontSize)
             g.drawString(placeholder, x, y - 5)
         }
 
@@ -400,7 +404,7 @@ class UITextField(
         val oldClip = g.clip
         g.clipRect(x, y, width, height)
 
-        g.font = game.fpsFont.deriveFont(32f)
+        g.font = game.fpsFont.deriveFont(fontSize)
         val fm = g.fontMetrics
         lastFontMetrics = fm
 
@@ -672,6 +676,473 @@ class UITextField(
     }
 }
 
+class UIDropdown(
+    val game: KapeLuz,
+    x: Int, y: Int, width: Int, height: Int,
+    var options: MutableList<String>,
+    var selectedIndex: Int = 0,
+    var onSelectionChanged: (Int) -> Unit
+) : UIComponent() {
+    var isExpanded = false
+    private var scrollY = 0
+    private val itemHeight = 35
+    private val maxVisibleItems = 5
+    private var isDraggingScrollbar = false
+    private var dragStartY = 0
+    private var initialScrollY = 0
+    private var initialSelectedIndex = 0
+    private var initialOptions = mutableListOf<String>()
+
+    init {
+        this.x = x
+        this.y = y
+        this.width = width
+        this.height = height
+        this.initialSelectedIndex = selectedIndex
+        this.initialOptions = options.toMutableList()
+    }
+
+    override fun saveInitialState() {
+        super.saveInitialState()
+        initialSelectedIndex = selectedIndex
+        initialOptions = options.toMutableList() // Tworzymy kopię listy
+    }
+
+    override fun restoreInitialState() {
+        super.restoreInitialState()
+        selectedIndex = initialSelectedIndex
+        options.clear()
+        options.addAll(initialOptions) // Przywracamy zawartość z kopii
+        isExpanded = false
+    }
+
+    private fun getDynamicMaxVisibleItems(): Int {
+        val availableSpace = game.uiReferenceHeight - (y + height + 10)
+        val itemsSpace = availableSpace / itemHeight
+        return itemsSpace.coerceIn(0, maxVisibleItems)
+    }
+
+    private fun getListHeight(): Int {
+        val maxItems = getDynamicMaxVisibleItems()
+        if (maxItems <= 0) return 0
+        return min(options.size, maxItems) * itemHeight
+    }
+
+    override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
+        if (!isVisible) return
+
+        // 1. Rysowanie głównego przycisku
+        val isHovered = isMouseOver(mouseX, mouseY) && isEnabled
+        g.color = if (isHovered) Color(0x808080) else Color(0x6d6d6d)
+        g.fillRect(x, y, width, height)
+        g.color = if (isExpanded) Color.YELLOW else Color.WHITE
+        g.drawRect(x, y, width, height)
+
+        g.font = game.fpsFont.deriveFont(24f)
+        val fm = g.fontMetrics
+        val text = if (options.isNotEmpty()) options[selectedIndex] else "Empty"
+        g.color = Color.WHITE
+        g.drawString(text, x + 10, y + (height + fm.ascent) / 2 - 2)
+
+        // Strzałka w dół
+        val arrowSize = 6
+        val ax = x + width - 20
+        val ay = y + height / 2
+        if (isExpanded) {
+            g.fillPolygon(intArrayOf(ax - arrowSize, ax + arrowSize, ax), intArrayOf(ay + arrowSize / 2, ay + arrowSize / 2, ay - arrowSize / 2), 3)
+        } else {
+            g.fillPolygon(intArrayOf(ax - arrowSize, ax + arrowSize, ax), intArrayOf(ay - arrowSize / 2, ay - arrowSize / 2, ay + arrowSize / 2), 3)
+        }
+    }
+
+    fun renderList(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
+        if (!isExpanded) return
+
+        val listHeight = getListHeight()
+        if (listHeight <= 0) return
+        val totalListHeight = options.size * itemHeight
+        val lx = x
+        val ly = y + height + 2
+
+        // Tło listy
+        g.color = Color(30, 30, 30, 240)
+        g.fillRect(lx, ly, width, listHeight)
+        g.color = Color.WHITE
+        g.drawRect(lx, ly, width, listHeight)
+
+        val oldClip = g.clip
+        g.clipRect(lx, ly, width, listHeight)
+
+        for (i in options.indices) {
+            val itemY = ly + (i * itemHeight) - scrollY
+            if (itemY + itemHeight < ly || itemY > ly + listHeight) continue
+
+            val isItemHovered = mouseX >= lx && mouseX <= lx + width && mouseY >= itemY && mouseY <= itemY + itemHeight
+            val isSelected = i == selectedIndex
+
+            if (isItemHovered) {
+                g.color = Color(255, 255, 255, 40)
+                g.fillRect(lx, itemY, width, itemHeight)
+            }
+
+            g.color = if (isSelected) Color.WHITE else Color.GRAY
+            g.font = game.fpsFont.deriveFont(if (isSelected) 20f else 18f)
+            g.drawString(options[i], lx + 10, itemY + 24)
+        }
+
+        // Pasek przewijania jeśli potrzebny
+        if (options.size * itemHeight > listHeight) {
+            val scrollBarW = 6
+            val viewRatio = listHeight.toDouble() / totalListHeight.toDouble()
+            val handleH = (listHeight * viewRatio).toInt()
+            val scrollRatio = scrollY.toDouble() / (totalListHeight - listHeight).toDouble()
+            val handleY = ly + (scrollRatio * (listHeight - handleH)).toInt()
+            
+            g.color = Color(100, 100, 100)
+            g.fillRect(lx + width - scrollBarW - 2, ly + 2, scrollBarW, listHeight - 4)
+            g.color = Color.WHITE
+            g.fillRect(lx + width - scrollBarW - 2, handleY, scrollBarW, handleH)
+        }
+
+        g.clip = oldClip
+    }
+
+    override fun onClick(clickX: Int, clickY: Int): Boolean {
+        if (isExpanded) {
+            val listHeight = getListHeight()
+            val ly = y + height + 2
+            // 1. Kliknięcie wewnątrz otwartej listy opcji
+            if (clickX >= x && clickX <= x + width && clickY >= ly && clickY <= ly + listHeight) {
+                val clickedIdx = ((clickY - ly + scrollY) / itemHeight).coerceIn(0, options.size - 1)
+                selectedIndex = clickedIdx
+                onSelectionChanged(selectedIndex)
+                isExpanded = false
+                return true
+            }
+            
+            // 2. Kliknięcie w nagłówek (główny przycisk), gdy lista jest otwarta -> zamknij
+            if (isMouseOver(clickX, clickY)) {
+                isExpanded = false
+                return true
+            }
+
+            // 3. Kliknięcie gdziekolwiek indziej, gdy lista jest otwarta -> zamknij i skonsumuj klik
+            isExpanded = false
+            return true
+        }
+
+        // 4. Kliknięcie w nagłówek, gdy lista jest zamknięta -> otwórz
+        if (isMouseOver(clickX, clickY)) {
+            val listHeight = getListHeight()
+            if (listHeight > 0) {
+                isExpanded = true
+                // CENTROWANIE: Próbuj ustawić zaznaczony element na 3. miejscu (index 2)
+                val totalHeight = options.size * itemHeight
+                val maxScroll = max(0, totalHeight - listHeight)
+                scrollY = ((selectedIndex - 2) * itemHeight).coerceIn(0, maxScroll)
+                return true
+            }
+        }
+
+        return false
+    }
+
+    override fun onScroll(amount: Int) {
+        val listHeight = getListHeight()
+        val totalHeight = options.size * itemHeight
+        
+        if (isExpanded && totalHeight > listHeight) {
+            scrollY = (scrollY + amount * 20).coerceIn(0, totalHeight - listHeight)
+        }
+    }
+
+    override fun onDrag(dragX: Int, dragY: Int) {
+        if (isDraggingScrollbar) {
+            val listHeight = getListHeight()
+            val totalHeight = options.size * itemHeight
+            val deltaY = dragY - dragStartY
+
+            val viewRatio = listHeight.toDouble() / totalHeight.toDouble()
+            val handleH = (listHeight * viewRatio).coerceAtLeast(10.0)
+            val trackHeight = listHeight - handleH
+
+            if (trackHeight > 0) {
+                val scrollPerPixel = (totalHeight - listHeight).toDouble() / trackHeight
+                scrollY = (initialScrollY + deltaY * scrollPerPixel).toInt().coerceIn(0, totalHeight - listHeight)
+            }
+        }
+    }
+
+    override fun onRelease(x: Int, y: Int) {
+        isDraggingScrollbar = false
+    }
+
+    override fun onPress(x: Int, y: Int): Boolean {
+        if (isExpanded) {
+            val listHeight = getListHeight()
+            val totalHeight = options.size * itemHeight
+            if (totalHeight > listHeight) {
+                val scrollBarW = 6
+                val lx = this.x
+                val ly = this.y + height + 2
+                val viewRatio = listHeight.toDouble() / totalHeight.toDouble()
+                val handleH = (listHeight * viewRatio).toInt()
+                val scrollRatio = scrollY.toDouble() / (totalHeight - listHeight).toDouble()
+                val handleY = ly + (scrollRatio * (listHeight - handleH)).toInt()
+
+                if (x >= lx + width - scrollBarW - 2 && x <= lx + width - 2 &&
+                    y >= handleY && y <= handleY + handleH) {
+                    isDraggingScrollbar = true
+                    dragStartY = y
+                    initialScrollY = scrollY
+                    return true
+                }
+            }
+            // Jeśli lista jest rozwinięta, przechwytujemy kliknięcie, by nie "przestrzeliło" pod spód
+            val ly = y + height + 2
+            if (x >= this.x && x <= this.x + width && y >= ly && y <= ly + getListHeight()) return true
+        }
+        return isMouseOver(x, y)
+    }
+}
+
+class UICheckbox(
+    x: Int, y: Int, width: Int, height: Int,
+    var text: String = "Checkbox",
+    var checked: Boolean = false,
+    var onToggle: (Boolean) -> Unit = {}
+) : UIComponent() {
+    var isEditingText = false
+    var cursorIndex = 0
+    var selectionStartIndex = 0
+    private var initialText: String = ""
+    private var initialChecked: Boolean = false
+
+    init {
+        this.x = x
+        this.y = y
+        this.width = width
+        this.height = height
+        this.initialText = text
+        this.initialChecked = checked
+    }
+
+    override fun saveInitialState() {
+        super.saveInitialState()
+        initialText = text
+        initialChecked = checked
+    }
+
+    override fun restoreInitialState() {
+        super.restoreInitialState()
+        text = initialText
+        checked = initialChecked
+        isEditingText = false
+    }
+
+    override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
+        if (!isVisible) return
+        val isHovered = isMouseOver(mouseX, mouseY) && isEnabled
+
+        // Tło jak w przycisku
+        g.color = if (!isEnabled) Color(0x2c2c2c) else if (isHovered) Color(0x808080) else Color(0x6d6d6d)
+        g.fillRect(x, y, width, height)
+
+        // Etykieta tekstowa
+        g.font = game.fpsFont.deriveFont(24f)
+        val fm = g.fontMetrics
+        g.color = Color.WHITE
+        g.drawString(text, x + 10, y + (height + fm.ascent) / 2 - 2)
+
+        // Wizualizacja suwaka (Toggle Switch) po prawej
+        val swWidth = 45
+        val swHeight = 18
+        val swX = x + width - swWidth - 15
+        val swY = y + (height - swHeight) / 2
+
+        // 1. Podstawa suwaka (Ciemnoszary / Zielony)
+        g.color = if (checked) Color(0x2ecc71) else Color(0x333333)
+        g.fillRect(swX, swY, swWidth, swHeight)
+        g.color = Color.BLACK
+        g.drawRect(swX, swY, swWidth, swHeight)
+
+        // 2. Sam suwak (Jasnoszary, wyższy i cieńszy)
+        val slWidth = 10
+        val slHeight = swHeight + 8
+        val slX = if (checked) swX + swWidth - slWidth else swX
+        val slY = swY - (slHeight - swHeight) / 2
+
+        g.color = Color(0xcccccc)
+        g.fillRect(slX, slY, slWidth, slHeight)
+        g.color = Color.WHITE
+        g.drawRect(slX, slY, slWidth, slHeight)
+    }
+
+    override fun onClick(clickX: Int, clickY: Int): Boolean {
+        if (isVisible && isEnabled && isMouseOver(clickX, clickY)) {
+            checked = !checked
+            onToggle(checked)
+            return true
+        }
+        return false
+    }
+
+    override fun onKey(e: KeyEvent): Boolean {
+        if (!isEditingText) return false
+        if (e.id == KeyEvent.KEY_PRESSED) {
+            when (e.keyCode) {
+                KeyEvent.VK_ENTER, KeyEvent.VK_ESCAPE -> {
+                    isEditingText = false
+                    return true
+                }
+                KeyEvent.VK_BACK_SPACE -> {
+                    if (selectionStartIndex != cursorIndex) {
+                        val start = min(selectionStartIndex, cursorIndex)
+                        val end = max(selectionStartIndex, cursorIndex)
+                        text = text.removeRange(start, end)
+                        cursorIndex = start
+                        selectionStartIndex = cursorIndex
+                    } else if (cursorIndex > 0) {
+                        text = text.removeRange(cursorIndex - 1, cursorIndex)
+                        cursorIndex--
+                        selectionStartIndex = cursorIndex
+                    }
+                    return true
+                }
+            }
+        } else if (e.id == KeyEvent.KEY_TYPED) {
+            val char = e.keyChar
+            if (char.code >= 32 && char.code != 127) {
+                if (selectionStartIndex != cursorIndex) {
+                    val start = min(selectionStartIndex, cursorIndex)
+                    val end = max(selectionStartIndex, cursorIndex)
+                    text = text.removeRange(start, end)
+                    cursorIndex = start
+                }
+                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
+                cursorIndex++
+                selectionStartIndex = cursorIndex
+                return true
+            }
+        }
+        return false 
+    }
+}
+
+enum class ProgressBarMode {
+    NONE, STEP_10, STEP_25
+}
+
+class UIProgressBar(
+    x: Int, y: Int, width: Int, height: Int,
+    var progress: Float = 0.5f, // 0.0 to 1.0
+    var text: String = "",
+    var fillColor: Color = Color(0x2ecc71), // Zielony
+    var mode: ProgressBarMode = ProgressBarMode.NONE,
+    var fontSize: Float = 20f,
+    var progressProvider: (() -> Float)? = null,
+    var textProvider: (() -> String)? = null
+) : UIComponent() {
+    var isEditingText = false
+    var cursorIndex = 0
+    var selectionStartIndex = 0
+    private var initialProgress = 0.5f
+    private var initialText = ""
+    private var initialFillColor = Color.GREEN
+    private var initialMode = ProgressBarMode.NONE
+    private var initialFontSize = 20f
+
+    init {
+        this.x = x; this.y = y; this.width = width; this.height = height
+        saveInitialState()
+    }
+
+    override fun saveInitialState() {
+        super.saveInitialState()
+        initialProgress = progress
+        initialText = text
+        initialFillColor = fillColor
+        initialMode = mode
+        initialFontSize = fontSize
+    }
+
+    override fun restoreInitialState() {
+        super.restoreInitialState()
+        progress = initialProgress
+        text = initialText
+        fillColor = initialFillColor
+        mode = initialMode
+        fontSize = initialFontSize
+        isEditingText = false
+    }
+
+    override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
+        if (!isVisible) return
+
+        // Pobieranie danych z gry, jeśli dostawcy są ustawieni
+        val currentProgress = progressProvider?.invoke() ?: progress
+        val displayText = textProvider?.invoke() ?: text
+
+        // Tło paska (Ciemnoszary)
+        g.color = Color(45, 45, 45)
+        g.fillRect(x, y, width, height)
+        
+        // Wypełnienie
+        val fillW = (width * currentProgress.coerceIn(0f, 1f)).toInt()
+        g.color = fillColor
+        g.fillRect(x, y, fillW, height)
+
+        // Przedziałki
+        g.color = Color(100, 100, 100, 150)
+        g.stroke = BasicStroke(1f)
+        when (mode) {
+            ProgressBarMode.STEP_10 -> {
+                for (i in 1..9) {
+                    val lx = x + (width * i / 10)
+                    g.drawLine(lx, y, lx, y + height)
+                }
+            }
+            ProgressBarMode.STEP_25 -> {
+                for (i in 1..3) {
+                    val lx = x + (width * i / 4)
+                    g.drawLine(lx, y, lx, y + height)
+                }
+            }
+            else -> {}
+        }
+
+        // Obramowanie
+        g.color = Color.WHITE
+        g.drawRect(x, y, width, height)
+
+        // Napis na środku
+        if (displayText.isNotEmpty() || isEditingText) {
+            g.font = game.fpsFont.deriveFont(fontSize)
+            val fm = g.fontMetrics
+            val tw = fm.stringWidth(displayText)
+            val tx = x + (width - tw) / 2
+            val ty = y + (height + fm.ascent) / 2 - 2
+            
+            g.color = Color.WHITE
+            g.drawString(displayText, tx, ty)
+
+            if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
+                val cursorX = tx + fm.stringWidth(displayText.substring(0, cursorIndex))
+                g.fillRect(cursorX, ty - fm.ascent, 2, fm.height)
+            }
+        }
+    }
+
+    override fun onKey(e: KeyEvent): Boolean {
+        if (!isEditingText) return false
+        // Używamy standardowej logiki wpisywania tekstu (uproszczone dla czytelności diffa)
+        if (e.id == KeyEvent.KEY_TYPED && e.keyChar.code >= 32) { text += e.keyChar; cursorIndex++; return true }
+        if (e.keyCode == KeyEvent.VK_BACK_SPACE && text.isNotEmpty()) { text = text.dropLast(1); cursorIndex--; return true }
+        if (e.keyCode == KeyEvent.VK_ENTER) { isEditingText = false; return true }
+        return false
+    }
+}
+
 class UIScrollPanel(
     x: Int, y: Int, width: Int, height: Int
 ) : UIComponent() {
@@ -798,6 +1269,11 @@ class UIScrollPanel(
         for (child in children) {
             child.onHover(relativeX, relativeY)
         }
+    }
+
+    override fun onKey(e: KeyEvent): Boolean {
+        if (!isVisible) return false
+        return children.any { it.onKey(e) }
     }
 }
 
@@ -1066,16 +1542,21 @@ class UIManager(val game: KapeLuz) {
     private var initialCompW = 0
     private var initialCompH = 0
 
+    private var dropdownJustOpened = false
+    var activeDropdown: UIDropdown? = null
     private var contextMenuVisible = false
     private var contextMenuX = 0
     private var contextMenuY = 0
     private var spawnX = 0
     private var spawnY = 0
 
+
     private val editorToolbar = mutableListOf<UIComponent>()
     private val contextMenuButtons = mutableListOf<UIButton>()
     private var exportField: UITextField? = null
     private var exportWindowVisible = false
+    private val inspectorFontSize = 18f
+    private val inspectorPanel = UIScrollPanel(game.uiReferenceWidth - 260, 0, 260, game.uiReferenceHeight)
 
     init {
         for (state in GameState.values()) {
@@ -1104,6 +1585,19 @@ class UIManager(val game: KapeLuz) {
             addNewComponent(UIText(spawnX, spawnY, "New Text", 24f, Color.WHITE))
             contextMenuVisible = false
         })
+        contextMenuButtons.add(UIButton(0, btnH * 3, btnW, btnH, "Add Dropdown", fontSize = 20f) {
+            addNewComponent(UIDropdown(game, spawnX, spawnY, 200, 40, mutableListOf("Opt 1", "Opt 2", "Opt 3"), 0) {})
+            contextMenuVisible = false
+        })
+        contextMenuButtons.add(UIButton(0, btnH * 4, btnW, btnH, "Add Checkbox", fontSize = 20f) {
+            addNewComponent(UICheckbox(spawnX, spawnY, 200, 40, "New Checkbox") {})
+            contextMenuVisible = false
+        })
+        contextMenuButtons.add(UIButton(0, btnH * 5, btnW, btnH, "Add Progress", fontSize = 20f) {
+            addNewComponent(UIProgressBar(spawnX, spawnY, 200, 30))
+            contextMenuVisible = false
+        })
+        inspectorPanel.isVisible = false
     }
 
     private fun addNewComponent(comp: UIComponent) {
@@ -1113,6 +1607,7 @@ class UIManager(val game: KapeLuz) {
             comp.saveInitialState()
             currentPanel.add(comp)
             selectedComponent = comp // Od razu zaznacz nowo postawiony obiekt
+            inspectorPanel.isVisible = false // Nie pokazuj panelu przy samym dodawaniu
         }
     }
 
@@ -1132,8 +1627,144 @@ class UIManager(val game: KapeLuz) {
             if (selectedComponent is UIButton) {
                 (selectedComponent as UIButton).isEditingText = false
             }
+            if (selectedComponent is UICheckbox) (selectedComponent as UICheckbox).isEditingText = false
+            if (selectedComponent is UIProgressBar) (selectedComponent as UIProgressBar).isEditingText = false
             selectedComponent = null
+            activeDropdown = null
+            inspectorPanel.isVisible = false
         }
+    }
+
+    private fun rebuildInspector() {
+        val comp = selectedComponent ?: return
+        inspectorPanel.clear()
+        inspectorPanel.isVisible = true
+        val labelColor = Color.YELLOW
+        var currY = 10
+
+        fun addHeader(text: String) {
+            inspectorPanel.addChild(UIText(10, currY, text, 18f, labelColor))
+            currY += 25
+        }
+
+        fun addField(label: String, initial: String, setter: (String) -> Unit) {
+            inspectorPanel.addChild(UIText(10, currY, "$label:", 14f, Color.LIGHT_GRAY))
+            val field = UITextField(10, currY + 18, 230, 30, initial, fontSize = inspectorFontSize)
+            field.onTextChanged = { setter(it) }
+            inspectorPanel.addChild(field)
+            currY += 55
+        }
+
+        // --- WSPÓLNE POLA ---
+        addHeader("Properties: ${comp.javaClass.simpleName}")
+        addField("X", comp.x.toString()) { comp.x = it.toIntOrNull() ?: comp.x }
+        addField("Y", comp.y.toString()) { comp.y = it.toIntOrNull() ?: comp.y }
+        addField("Width", comp.width.toString()) { comp.width = it.toIntOrNull() ?: comp.width }
+        addField("Height", comp.height.toString()) { comp.height = it.toIntOrNull() ?: comp.height }
+
+        // --- POLA ZALEŻNE OD TYPU ---
+        when (comp) {
+            is UIButton -> {
+                addField("Text", comp.text) { comp.text = it }
+                addField("HEX Color", String.format("#%06X", comp.textColor.rgb and 0xFFFFFF)) {
+                    try { comp.textColor = Color.decode(it) } catch (e: Exception) {}
+                }
+            }
+            is UIText -> {
+                addField("Text", comp.text) { comp.text = it }
+                addField("Font Size", comp.fontSize.toString()) { comp.fontSize = it.toFloatOrNull() ?: comp.fontSize }
+                addField("HEX Color", String.format("#%06X", comp.color.rgb and 0xFFFFFF)) {
+                    try { comp.color = Color.decode(it) } catch (e: Exception) {}
+                }
+            }
+            is UITextField -> {
+                addField("Value", comp.text) { comp.text = it }
+                addField("Placeholder", comp.placeholder) { comp.placeholder = it }
+            }
+            is UICheckbox -> {
+                addField("Label", comp.text) { comp.text = it }
+                inspectorPanel.addChild(UIButton(10, currY, 230, 30, "State: ${comp.checked}") {
+                    comp.checked = !comp.checked
+                    rebuildInspector() // Odśwież napis na przycisku
+                }.apply { fontSize = 16f })
+                currY += 40
+            }
+            is UIProgressBar -> {
+                addField("Label", comp.text) { comp.text = it }
+                addField("Font Size", comp.fontSize.toString()) { comp.fontSize = it.toFloatOrNull() ?: comp.fontSize }
+                addField("Progress (0.0-1.0)", comp.progress.toString()) { comp.progress = it.toFloatOrNull() ?: comp.progress }
+                addField("HEX Fill", String.format("#%06X", comp.fillColor.rgb and 0xFFFFFF)) {
+                    try { comp.fillColor = Color.decode(it) } catch (e: Exception) {}
+                }
+                inspectorPanel.addChild(UIButton(10, currY, 230, 30, "Mode: ${comp.mode}") {
+                    comp.mode = ProgressBarMode.values()[(comp.mode.ordinal + 1) % ProgressBarMode.values().size]
+                    rebuildInspector()
+                }.apply { fontSize = 16f })
+                currY += 40
+            }
+            is UIDropdown -> {
+                addField("Selected Index", comp.selectedIndex.toString()) { 
+                    comp.selectedIndex = (it.toIntOrNull() ?: comp.selectedIndex).coerceIn(0, comp.options.size - 1)
+                }
+                addHeader("Options Management:")
+                
+                comp.options.forEachIndexed { index, opt ->
+                    val rowY = currY
+                    // Pole nazwy opcji
+                    val optField = UITextField(10, rowY, 130, 25, opt, fontSize = inspectorFontSize)
+                    optField.onTextChanged = { comp.options[index] = it }
+                    inspectorPanel.addChild(optField)
+                    
+                    // Przyciski kontrolne (Góra, Dół, Usuń)
+                    inspectorPanel.addChild(UIButton(145, rowY, 25, 25, "^") {
+                        if (index > 0) {
+                            java.util.Collections.swap(comp.options, index, index - 1)
+                            rebuildInspector()
+                        }
+                    }.apply { fontSize = 14f })
+                    
+                    inspectorPanel.addChild(UIButton(175, rowY, 25, 25, "v") {
+                        if (index < comp.options.size - 1) {
+                            java.util.Collections.swap(comp.options, index, index + 1)
+                            rebuildInspector()
+                        }
+                    }.apply { fontSize = 14f })
+                    
+                    inspectorPanel.addChild(UIButton(205, rowY, 25, 25, "X", textColor = Color.RED) {
+                        if (comp.options.size > 1) {
+                            comp.options.removeAt(index)
+                            comp.selectedIndex = comp.selectedIndex.coerceIn(0, comp.options.size - 1)
+                            rebuildInspector()
+                        }
+                    }.apply { fontSize = 14f })
+                    
+                    currY += 30
+                }
+                
+                inspectorPanel.addChild(UIButton(10, currY, 230, 30, "+ Add Option") {
+                    comp.options.add("New Option")
+                    rebuildInspector()
+                }.apply { fontSize = 16f })
+                currY += 40
+            }
+        }
+    }
+
+    private fun renderInspector(g: Graphics2D, mouseX: Int, mouseY: Int) {
+        if (!isEditorMode || selectedComponent == null || !inspectorPanel.isVisible) return
+
+        // Tło panelu
+        g.color = Color(40, 40, 40, 240)
+        g.fillRect(inspectorPanel.x, 0, inspectorPanel.width, game.uiReferenceHeight)
+        g.color = Color.BLACK
+        g.drawRect(inspectorPanel.x, 0, inspectorPanel.width, game.uiReferenceHeight)
+
+        // Linia oddzielająca
+        g.color = Color.YELLOW
+        g.stroke = BasicStroke(2f)
+        g.drawLine(inspectorPanel.x, 0, inspectorPanel.x, game.uiReferenceHeight)
+
+        inspectorPanel.render(g, game, mouseX, mouseY)
     }
 
     private fun exportCode() {
@@ -1147,6 +1778,12 @@ class UIManager(val game: KapeLuz) {
                     sb.append("UIText(${comp.x}, ${comp.y}, \"${comp.text}\", ${comp.fontSize}f, Color(${comp.color.red}, ${comp.color.green}, ${comp.color.blue}), centered = ${comp.centered})\n")
                 } else if (comp is UITextField) {
                     sb.append("UITextField(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", \"${comp.placeholder}\")\n")
+                } else if (comp is UIDropdown) {
+                    sb.append("UIDropdown(this, ${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, mutableListOf(${comp.options.joinToString { "\"$it\"" }}), ${comp.selectedIndex}) { index -> }\n")
+                } else if (comp is UICheckbox) {
+                    sb.append("UICheckbox(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", ${comp.checked}) { checked -> }\n")
+                } else if (comp is UIProgressBar) {
+                    sb.append("UIProgressBar(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, progress = ${comp.progress}f, text = \"${comp.text}\", fillColor = Color(${comp.fillColor.rgb}), mode = ProgressBarMode.${comp.mode}, fontSize = ${comp.fontSize}f)\n")
                 }
             }
         }
@@ -1215,8 +1852,8 @@ class UIManager(val game: KapeLuz) {
         if (contextMenuVisible) {
             g.translate(contextMenuX, contextMenuY)
             contextMenuButtons.forEach { it.render(g, game, mouseX - contextMenuX, mouseY - contextMenuY) }
-            g.color = Color.WHITE
-            g.drawRect(0, 0, 150, contextMenuButtons.size * 40)
+            g.color = Color(0, 255, 255)
+            g.drawRect(0, 0, 150, contextMenuButtons.size * 40) // Podświetlenie obramowania menu
             g.translate(-contextMenuX, -contextMenuY)
         }
 
@@ -1240,16 +1877,24 @@ class UIManager(val game: KapeLuz) {
         // 1. Rysowanie głównych komponentów (tylko jeśli panel istnieje dla tego stanu)
         currentPanel?.render(g, game, mouseX, mouseY)
 
-        // 2. Rysowanie Tooltipów na wierzchu wszystkiego
-        if (currentPanel != null) {
-            renderTooltipLayer(g, currentPanel, mouseX, mouseY)
-        }
-
-        // 3. Przycisk przełącznika (jeśli aktywowany F6)
+        // 2. Przycisk przełącznika (jeśli aktywowany F6)
         if (isEditorButtonVisible) editorToggleButton.render(g, game, mouseX, mouseY)
 
         if (isEditorMode) {
             renderEditorUI(g, mouseX, mouseY)
+        }
+        
+        // 3. Rysowanie aktywnej listy dropdown (musi być pod Inspektorem w trybie edycji)
+        activeDropdown?.renderList(g, game, mouseX, mouseY)
+
+        // 4. Inspector (Prawy panel)
+        if (isEditorMode && selectedComponent != null && inspectorPanel.isVisible) {
+            renderInspector(g, mouseX, mouseY)
+        }
+        
+        // 5. Rysowanie Tooltipów (Zawsze na samym wierzchu)
+        if (currentPanel != null) {
+            renderTooltipLayer(g, currentPanel, mouseX, mouseY)
         }
     }
 
@@ -1308,6 +1953,23 @@ class UIManager(val game: KapeLuz) {
         // Przycisk ED ma zawsze priorytet, jeśli jest widoczny
         if (isEditorButtonVisible && editorToggleButton.onClick(x, y)) return true
 
+        // Inspektor ma priorytet kliknięć nad Dropdownem w trybie edycji
+        if (isEditorMode && inspectorPanel.isVisible && x >= inspectorPanel.x) {
+            return inspectorPanel.onClick(x, y)
+        }
+
+        // Jeśli dropdown jest otwarty, ma on priorytet nad wszystkim
+        activeDropdown?.let {
+            if (dropdownJustOpened) {
+                dropdownJustOpened = false
+                return true 
+            }
+
+            val handled = it.onClick(x, y)
+            if (!it.isExpanded) activeDropdown = null
+            if (handled) return true
+        }
+
         if (isEditorMode) {
             if (contextMenuVisible) {
                 for (btn in contextMenuButtons) {
@@ -1328,14 +1990,39 @@ class UIManager(val game: KapeLuz) {
                 if (tool.onClick(x, y)) return true
             }
             
+            // Pozwól zaznaczonemu Dropdownowi otworzyć się po pojedynczym kliknięciu
+            if (selectedComponent is UIDropdown && selectedComponent!!.isMouseOver(x, y)) {
+                if (selectedComponent!!.onClick(x, y)) {
+                    if ((selectedComponent as UIDropdown).isExpanded) {
+                        activeDropdown = selectedComponent as UIDropdown
+                        dropdownJustOpened = true // Zapobiegaj natychmiastowemu zamknięciu przy zwolnieniu myszy
+                    }
+                    return true
+                }
+            }
+
             // W trybie edycji blokujemy standardowe kliknięcia komponentów panelu
             return true
         }
-        return panels[game.gameState]?.handleClick(x, y) ?: false
+        
+        val panelHandled = panels[game.gameState]?.handleClick(x, y) ?: false
+        
+        // Jeśli kliknięcie w panel spowodowało otwarcie jakiegoś dropdowna, zapisz go jako aktywny
+        if (panelHandled && activeDropdown == null) {
+            activeDropdown = panels[game.gameState]?.components?.find { it is UIDropdown && it.isExpanded } as? UIDropdown
+        }
+        
+        return panelHandled
     }
 
     fun handleHover(x: Int, y: Int) {
         if (isEditorButtonVisible) editorToggleButton.onHover(x, y)
+        
+        if (isEditorMode && inspectorPanel.isVisible && x >= inspectorPanel.x) {
+            inspectorPanel.onHover(x, y)
+            return // Jeśli myszka jest nad inspektorem, nie hoverujemy elementów pod spodem
+        }
+
         if (isEditorMode) {
             if (contextMenuVisible) contextMenuButtons.forEach { it.onHover(x - contextMenuX, y - contextMenuY) }
             editorToolbar.forEach { it.onHover(x, y) }
@@ -1345,12 +2032,33 @@ class UIManager(val game: KapeLuz) {
     }
 
     fun handleScroll(amount: Int) {
+        if (isEditorMode && inspectorPanel.isVisible && game.inputManager.windowPos.x >= inspectorPanel.x) {
+            inspectorPanel.onScroll(amount)
+        } else {
+            activeDropdown?.onScroll(amount)
+        }
         if (isEditorMode && exportWindowVisible) exportField?.onScroll(amount)
         panels[game.gameState]?.handleScroll(amount)
     }
 
     fun handlePress(x: Int, y: Int): Boolean {
         if (isEditorButtonVisible && editorToggleButton.isMouseOver(x, y)) return editorToggleButton.onPress(x, y)
+
+        // 1. PRIORYTET: Inspektor (jeśli widoczny i myszka nad nim)
+        if (isEditorMode && inspectorPanel.isVisible && x >= inspectorPanel.x) {
+            return inspectorPanel.onPress(x, y)
+        }
+
+        // 2. PRIORYTET: Aktywny Dropdown (jeśli nie klikamy w nagłówek w trybie edycji)
+        // Warstwa popup (aktywny dropdown) ma priorytet
+        activeDropdown?.let {
+            // W trybie edycji pozwalamy "przebić się" przez nagłówek aktywnego dropdowna, 
+            // aby performComponentSelection mogło wykryć dwuklik dla Inspektora.
+            val isHeaderClick = it.isMouseOver(x, y)
+            if (!(isEditorMode && isHeaderClick)) {
+                if (it.onPress(x, y)) return true
+            }
+        }
 
         if (isEditorMode) {
             // Obsługa prawego przycisku myszy (Otwieranie Context Menu)
@@ -1371,10 +2079,11 @@ class UIManager(val game: KapeLuz) {
 
             if (exportWindowVisible) return exportField?.onPress(x, y) ?: false
             
-            // Toolbar ma priorytet
+            val panel = panels[game.gameState]
+            
+            // Toolbar Press
             for (tool in editorToolbar) if (tool.onPress(x, y)) return true
 
-            val panel = panels[game.gameState]
             if (panel != null) {
                 val margin = 15
 
@@ -1407,9 +2116,16 @@ class UIManager(val game: KapeLuz) {
                 is UIButton -> old.isEditingText = false
                 is UIText -> old.isEditingText = false
                 is UITextField -> old.isFocused = false
+                is UIDropdown -> old.isExpanded = false
+                is UICheckbox -> old.isEditingText = false
+                is UIProgressBar -> old.isEditingText = false
             }
             selectedComponent = null
+            activeDropdown = null
+            inspectorPanel.isVisible = false
         }
+        
+        // Jeśli nie jesteśmy w trybie edycji, kliknięcie w panel może otworzyć dropdown
         return panels[game.gameState]?.handlePress(x, y) ?: false
     }
 
@@ -1425,13 +2141,21 @@ class UIManager(val game: KapeLuz) {
                 is UIButton -> old.isEditingText = false
                 is UIText -> old.isEditingText = false
                 is UITextField -> old.isFocused = false
+                is UIDropdown -> old.isExpanded = false
+                is UICheckbox -> old.isEditingText = false
+                is UIProgressBar -> old.isEditingText = false
             }
         }
 
         // Przenieś komponent na sam wierzch warstwy (na koniec listy)
         moveComponentToFront(comp)
 
+        selectedComponent = comp
+
         if (isDoubleClick) {
+            // Pokazujemy panel TYLKO przy dwukliku
+            rebuildInspector()
+
             when (comp) {
                 is UIButton -> {
                     comp.isEditingText = true
@@ -1448,10 +2172,24 @@ class UIManager(val game: KapeLuz) {
                     comp.selectionStartIndex = 0
                     comp.cursorIndex = comp.text.length
                 }
+                is UIDropdown -> {
+                    // Dwuklik otwiera tylko Inspektor (rebuildInspector() wywołane wyżej).
+                    // Ekspansja listy jest obsługiwana przez pojedynczy klik w handleClick.
+                }
+                is UICheckbox -> {
+                    comp.isEditingText = true
+                    comp.cursorIndex = comp.text.length
+                }
+                is UIProgressBar -> {
+                    comp.isEditingText = true
+                    comp.cursorIndex = comp.text.length
+                }
             }
+        } else {
+            // Przy pojedynczym kliknięciu (zaznaczenie/przesuwanie) panel zawsze znika
+            inspectorPanel.isVisible = false
         }
 
-        selectedComponent = comp
         dragStartX = x; dragStartY = y
         initialCompX = comp.x; initialCompY = comp.y
         initialCompW = comp.width; initialCompH = comp.height
@@ -1476,6 +2214,10 @@ class UIManager(val game: KapeLuz) {
 
     fun handleRelease(x: Int, y: Int) {
         if (isEditorButtonVisible) editorToggleButton.onRelease(x, y)
+        activeDropdown?.onRelease(x, y)
+        
+        if (isEditorMode && inspectorPanel.isVisible) inspectorPanel.onRelease(x, y)
+
         if (isEditorMode) {
             isDragging = false
             isResizingLeft = false; isResizingRight = false
@@ -1489,6 +2231,13 @@ class UIManager(val game: KapeLuz) {
 
     fun handleDrag(x: Int, y: Int) {
         if (isEditorButtonVisible) editorToggleButton.onDrag(x, y)
+        activeDropdown?.onDrag(x, y)
+
+        if (isEditorMode && inspectorPanel.isVisible && x >= inspectorPanel.x) {
+            inspectorPanel.onDrag(x, y)
+            return
+        }
+
         if (isEditorMode) {
             if (exportWindowVisible) { exportField?.onDrag(x, y); return }
             
@@ -1530,6 +2279,8 @@ class UIManager(val game: KapeLuz) {
         if (isEditorMode) {
             if (exportWindowVisible) return exportField?.onKey(e) ?: false
             // Jeśli edytujemy tekst w wybranym komponencie
+            if (inspectorPanel.onKey(e)) return true
+            
             if (selectedComponent?.onKey(e) == true) return true
         }
         return panels[game.gameState]?.handleKey(e) ?: false

@@ -72,7 +72,9 @@ data class WorldData(
     val gameTime: Double = 12.0,
     val dayCounter: Int = 0,
     val localDimension: String = "overworld",
-    val worldName: String = ""
+    val worldName: String = "",
+    val playerXP: Int = 0,
+    val playerLevel: Int = 0
 )
 
 open class ChunkIO(worldName: String) {
@@ -455,6 +457,8 @@ open class ChunkIO(worldName: String) {
                 writeField("dayCounter", TAG_INT, data.dayCounter)
                 writeField("localDimension", TAG_STRING, data.localDimension)
                 writeField("worldName", TAG_STRING, data.worldName)
+                writeField("playerXP", TAG_INT, data.playerXP)
+                writeField("playerLevel", TAG_INT, data.playerLevel)
 
                 dos.writeByte(TAG_END.toInt()) // Znacznik końca danych
             }
@@ -495,6 +499,8 @@ open class ChunkIO(worldName: String) {
                 var dayCounter = 0
                 var localDimension = "overworld"
                 var worldName = ""
+                var playerXP = 0
+                var playerLevel = 0
 
                 try {
                     if (version >= 2) {
@@ -527,6 +533,8 @@ open class ChunkIO(worldName: String) {
                                 "dayCounter" -> dayCounter = value as Int
                                 "localDimension" -> localDimension = value as String
                                 "worldName" -> worldName = value as String
+                                "playerXP" -> playerXP = value as Int
+                                "playerLevel" -> playerLevel = value as Int
                             }
                         }
                     } else {
@@ -536,7 +544,7 @@ open class ChunkIO(worldName: String) {
                     // Koniec pliku - normalne zachowanie
                 }
 
-                WorldData(seed, x, y, z, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, worldName)
+                WorldData(seed, x, y, z, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, worldName, playerXP, playerLevel)
             }
         } catch (e: IOException) {
             e.printStackTrace()

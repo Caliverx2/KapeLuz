@@ -142,6 +142,8 @@ class KapeLuz : JPanel() {
     // Kamera
     var currentWorldFolderName = ""
     var currentWorldDisplayName = ""
+    var playerLevel = 0
+    var playerXP = 0
     var localDimension = "overworld"
     var fov = 90.0
     var camX = 0.0
@@ -162,6 +164,10 @@ class KapeLuz : JPanel() {
     var speed = 0.3
     var currentSpeed = speed
     val rotationalSpeed = 0.1
+
+    // --- Persystentne Ustawienia UI ---
+    var settingShadowsEnabled = true
+    var settingExampleDropdownIdx = 0
 
     var debugNoclip = false
     var debugFly = false
@@ -615,6 +621,10 @@ class KapeLuz : JPanel() {
 
         // Ładujemy mody raz przy starcie aplikacji
         modLoader.loadMods()
+        
+        // Ładowanie ustawień z options.txt
+        loadOptions()
+        saveOptions()
 
         loop()
     }
@@ -772,6 +782,25 @@ class KapeLuz : JPanel() {
         hud.add(UIDebugInfo())
         hud.add(UIPlayerList())
         hud.add(UIInventory())
+        hud.add(UIDebugInfo())
+        hud.add(UIPlayerList())
+        hud.add(UIInventory())
+
+        // --- PASEK XP (HUD) ---
+        val xpBarW = 490
+        val xpBarH = 12
+        val xpBarX = (uiReferenceWidth - xpBarW) / 2
+        val xpBarY = uiReferenceHeight - 85 // Pozycja nad hotbarem
+
+        hud.add(UIProgressBar( xpBarX, xpBarY, xpBarW, xpBarH,
+            fillColor = Color(0x3cf03c), // Kolor XP (jasnozielony)
+            mode = ProgressBarMode.STEP_10,
+            fontSize = 14f,
+            progressProvider = {
+                playerXP.toFloat() / getXPNeededForNextLevel(playerLevel).toFloat()
+            },
+            textProvider = { if (playerLevel > 0) "$playerLevel" else "" }
+        ))
     }
 
     // Funkcja rekurencyjna do wznawiania połączenia
@@ -824,6 +853,19 @@ class KapeLuz : JPanel() {
         })
 
         val scrollPanel = UIScrollPanel(6, 80, 400, 470)
+
+        options.add(UICheckbox(400, 50*7-70, 380, 40, "Enable Shadows", settingShadowsEnabled) { checked ->
+            settingShadowsEnabled = checked
+            saveOptions()
+            println("Shadows globally set to: $settingShadowsEnabled")
+        })
+
+        options.add(UIText(400, 50*8-80, "Dropdown Example:", 14f, Color.LIGHT_GRAY))
+        options.add(UIDropdown(this, 400, 50*9-90, 380, 40, mutableListOf("1. Low", "2. Medium", "3. High", "4. Ultra", "5. Insane"), settingExampleDropdownIdx) { index ->
+            settingExampleDropdownIdx = index
+            saveOptions()
+            println("Quality set to index: $settingExampleDropdownIdx")
+        })
 
         scrollPanel.addChild(UIButton(10, 50*0, 380, 41, " Accessiblility", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Accessiblility", fontSize = 30f) {
             println("page: Accessiblility")
@@ -933,7 +975,7 @@ class KapeLuz : JPanel() {
         val spawnH = tempChunkGen.getTerrainHeight(0, 0)
         val spawnY = (spawnH + 3) * cubeSize - 10.0
 
-        newChunkIO.saveWorldData(WorldData(finalSeed, 0.0, spawnY, 0.0, 0.0, 0.0, worldName = name))
+        newChunkIO.saveWorldData(WorldData(finalSeed, 0.0, spawnY, 0.0, 0.0, 0.0, worldName = name, playerXP = playerXP, playerLevel = playerLevel))
 
         startGame(folderName)
     }
@@ -984,9 +1026,10 @@ class KapeLuz : JPanel() {
             ImageIO.write(scaledIcon, "png", iconFile)
         } catch (e: Exception) { println("Failed to save world icon: ${e.message}") }
 
-        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
+        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName, playerXP, playerLevel))
         println("All modified chunks saved.")
 
+        saveOptions() // Zapisz ustawienia przy wyjściu do menu
         // FIX: Ustawiamy flagę, że to my zamykamy połączenie, aby connectWithRetry nie próbował łączyć ponownie
         isDisconnectingIntentional = true
         sendDisconnectPacket() // Wyślij info o wyjściu
@@ -1014,6 +1057,8 @@ class KapeLuz : JPanel() {
         lastChunkZ = Int.MAX_VALUE
         gameTime = 12.0
         dayCounter = 0
+        playerXP = 0
+        playerLevel = 0
         localDimension = ""
         camX = 0.0; camY = 0.0; camZ = 0.0
         yaw = 0.0; pitch = 0.0
@@ -1039,12 +1084,92 @@ class KapeLuz : JPanel() {
         remotePlayers.clear()
         playerNetIds.clear()
         nextNetId = 2 // Reset licznika ID przy restarcie gry
+        playerLevel = 0
+        playerXP = 0
         myPlayerId = ""
         isHost = false
         isMultiplayerClient = false
         isDisconnectingIntentional = false // Reset flagi przy restarcie gry
         roomCodeComponent?.text = "" // Reset kodu przy restarcie
     }
+
+    // --- LOGIKA XP I POZIOMÓW ---
+    fun getXPNeededForNextLevel(level: Int): Int {
+        return when {
+            level <= 16 -> 2 * level + 7
+            level <= 31 -> 5 * level - 38
+            else -> 9 * level - 158
+        }
+    }
+
+    fun addXP(amount: Int) {
+        playerXP += amount
+        while (playerXP >= getXPNeededForNextLevel(playerLevel)) {
+            playerXP -= getXPNeededForNextLevel(playerLevel)
+            playerLevel++
+        }
+        if (playerXP < 0) playerXP = 0
+    }
+
+    // --- SYSTEM OBSŁUGI USTAWIEŃ (options.txt) ---
+    private fun loadOptions() {
+        val file = File(gameDir, "options.txt")
+        if (!file.exists()) return
+
+        try {
+            file.readLines().forEach { line ->
+                val cleanLine = line.trim()
+                if (cleanLine.isEmpty() || !cleanLine.contains("=")) return@forEach
+                
+                val key = cleanLine.substringBefore("=").trim()
+                val value = cleanLine.substringAfter("=").substringBefore(";").trim()
+
+                // Whitelist i aplikowanie wartości
+                when (key) {
+                    "settingShadowsEnabled" -> settingShadowsEnabled = value.toBoolean()
+                    "settingExampleDropdownIdx" -> settingExampleDropdownIdx = value.toIntOrNull() ?: 0
+                    "debugNoclip" -> debugNoclip = value.toBoolean()
+                    "debugFly" -> debugFly = value.toBoolean()
+                    "debugFullbright" -> debugFullbright = value.toBoolean()
+                    "fov" -> fov = value.toDoubleOrNull() ?: 90.0
+                    "renderDistance" -> renderDistance = value.toIntOrNull() ?: 5
+                    "speed" -> speed = value.toDoubleOrNull() ?: 0.3
+                    "minLightFactor" -> minLightFactor = value.toDoubleOrNull() ?: 0.15
+                }
+            }
+            println("Ustawienia załadowane z ${file.absolutePath}")
+        } catch (e: Exception) {
+            println("Błąd podczas ładowania options.txt: ${e.message}")
+        }
+    }
+
+    private fun saveOptions() {
+        val file = File(gameDir, "options.txt")
+        try {
+            val sb = StringBuilder()
+            
+            // Helper do budowania linii w formacie Klucz = Wartość;
+            fun appendOption(key: String, value: Any) {
+                sb.append("$key = $value;\n")
+            }
+
+            // Whitelist zapisu
+            appendOption("settingShadowsEnabled", settingShadowsEnabled)
+            appendOption("settingExampleDropdownIdx", settingExampleDropdownIdx)
+            appendOption("debugNoclip", debugNoclip)
+            appendOption("debugFly", debugFly)
+            appendOption("debugFullbright", debugFullbright)
+            appendOption("fov", fov)
+            appendOption("renderDistance", renderDistance)
+            appendOption("speed", speed)
+            appendOption("minLightFactor", minLightFactor)
+
+            file.writeText(sb.toString())
+        } catch (e: Exception) {
+            println("Błąd podczas zapisywania options.txt: ${e.message}")
+        }
+    }
+    // ---------------------------------------------
 
     private fun startGame(folderName: String, isClient: Boolean = false) {
         resetGame()
@@ -1076,6 +1201,8 @@ class KapeLuz : JPanel() {
             dayCounter = worldData.dayCounter
             localDimension = worldData.localDimension
             currentWorldDisplayName = worldData.worldName.ifBlank { folderName }
+            playerXP = worldData.playerXP
+            playerLevel = worldData.playerLevel
         } else {
             seed = folderName.hashCode() // Domyślny seed dla nowego świata
             localDimension = "overworld"
@@ -2026,7 +2153,7 @@ class KapeLuz : JPanel() {
         // Remove saved entities from RAM
         entities.removeIf { it.dimension == localDimension }
 
-        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
+        chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName, playerXP, playerLevel))
         if (savedCount > 0) println("Auto-saved $savedCount chunks in $localDimension.")
 
         localDimension = dim
@@ -3976,7 +4103,7 @@ class KapeLuz : JPanel() {
                                     savedCount++
                                 }
                             }
-                            chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName))
+                            chunkIO.saveWorldData(WorldData(seed, camX, camY, camZ, yaw, pitch, debugNoclip, debugFly, debugFullbright, showChunkBorders, debugXray, gameTime, dayCounter, localDimension, currentWorldDisplayName, playerXP, playerLevel))
                             if (savedCount > 0) println("Auto-saved $savedCount chunks in $localDimension (Background).")
                         }
                     }
@@ -5977,6 +6104,12 @@ class KapeLuz : JPanel() {
 
             if (keyCode == KeyEvent.VK_F9) changeDimension("overworld")
             if (keyCode == KeyEvent.VK_F10) changeDimension("the_nether")
+            if (keyCode == KeyEvent.VK_F8) {
+                // Normalny klik: 1 XP, Ctrl + F8: 100 XP (do testów)
+                val amount = if (inputManager.isKeyDown(KeyEvent.VK_CONTROL)) 100 else 1
+                addXP(amount)
+                println("level: $playerLevel, xp: $playerXP")
+            }
 
             if (keyCode == KeyEvent.VK_Q) {
                 if (gameState == GameState.IN_GAME) {

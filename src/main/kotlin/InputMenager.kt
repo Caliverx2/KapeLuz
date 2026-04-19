@@ -21,7 +21,7 @@ open class InputManager(private val component: Component) {
         private set
 
     private val robot = try { Robot() } catch (e: AWTException) { null }
-    private var windowPos = Point(0, 0)
+    var windowPos = Point(0, 0)
 
     private val blankCursor: Cursor by lazy {
         val blankImage = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB)

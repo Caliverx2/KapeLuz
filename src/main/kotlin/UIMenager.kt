@@ -1286,11 +1286,12 @@ class UIBackground(var color: Color) : UIComponent() {
 
 class UIFpsCounter : UIComponent() {
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
-        g.font = game.fpsFont
+        val font = game.fpsFont.deriveFont(30f)
+        g.font = font
         g.color = Color.YELLOW
         val fpsText = "${game.fps}"
         val fm = g.fontMetrics
-        g.drawString(fpsText, game.referenceWidth - fm.stringWidth(fpsText) - 10, fm.ascent + 10)
+        g.drawString(fpsText, game.uiReferenceWidth - fm.stringWidth(fpsText) - 10, fm.ascent + 10)
     }
 }
 
@@ -1306,7 +1307,7 @@ class UIPlayerList : UIComponent() {
         val PlayerCount = "Players (${game.remotePlayers.size+1}):"
         val SessionID = ":  : ${myId} (${floor((game.camX + (game.cubeSize/2))/2).toInt()}, ${floor((game.camY + (game.cubeSize/2))/2).toInt()+5}, ${floor((game.camZ + (game.cubeSize/2)) /2).toInt()})"
         // Obliczenia dla wyśrodkowania listy (-200 do +200 od środka)
-        val centerX = game.referenceWidth / 2
+        val centerX = game.uiReferenceWidth / 2
         val listWidth = 400
         val startX = centerX - 200
         val textX = startX + 10 // Padding 10 od lewej krawędzi listy
@@ -1351,6 +1352,7 @@ class UIDebugInfo : UIComponent() {
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
         if (!game.showChunkBorders) return
         
+        g.font = game.fpsFont.deriveFont(27f) // Stały rozmiar dla debuga
         val fm = g.fontMetrics
         val currentChunkX = floor(game.camX / 32.0).toInt()
         val currentChunkZ = floor(game.camZ / 32.0).toInt()
@@ -1382,11 +1384,11 @@ class UIDebugInfo : UIComponent() {
         val memText = "Heap: ${displayUsedMem / 2}/${displayTotalMem}MB | Direct: ${displayDirectMem}MB | Meta: ${displayMetaMem}MB"
 
         g.color = Color(0.82f, 0.82f, 0.82f, 0.75f)
-        g.fillRect(5, 15, fm.stringWidth(chunkText) + 5, fm.ascent)
-        g.fillRect(5, fm.ascent + 15, fm.stringWidth(posText) + 5, fm.ascent)
-        g.fillRect(5, fm.ascent*2 + 15, fm.stringWidth(timeText) + 5, fm.ascent)
-        g.fillRect(5, fm.ascent*3 + 15, fm.stringWidth(seedText) + 5, fm.ascent)
-        g.fillRect(5, fm.ascent*4 + 15, fm.stringWidth(memText) + 5, fm.ascent)
+        g.fillRect(5, 15, fm.stringWidth(chunkText) + 10, fm.ascent)
+        g.fillRect(5, fm.ascent + 15, fm.stringWidth(posText) + 10, fm.ascent)
+        g.fillRect(5, fm.ascent*2 + 15, fm.stringWidth(timeText) + 10, fm.ascent)
+        g.fillRect(5, fm.ascent*3 + 15, fm.stringWidth(seedText) + 10, fm.ascent)
+        g.fillRect(5, fm.ascent*4 + 15, fm.stringWidth(memText) + 10, fm.ascent)
 
         g.color = Color.WHITE
         g.drawString(chunkText, 10, fm.ascent + 10)

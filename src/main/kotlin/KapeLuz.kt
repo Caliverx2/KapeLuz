@@ -782,9 +782,6 @@ class KapeLuz : JPanel() {
         hud.add(UIDebugInfo())
         hud.add(UIPlayerList())
         hud.add(UIInventory())
-        hud.add(UIDebugInfo())
-        hud.add(UIPlayerList())
-        hud.add(UIInventory())
 
         // --- PASEK XP (HUD) ---
         val xpBarW = 490

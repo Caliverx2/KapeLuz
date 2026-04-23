@@ -1143,6 +1143,8 @@ class UIProgressBar(
     }
 }
 
+//zoba tutaj dodaje scroll w 3 minuty speedrun btw
+
 class UIScrollPanel(
     x: Int, y: Int, width: Int, height: Int
 ) : UIComponent() {

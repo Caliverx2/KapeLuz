@@ -864,6 +864,12 @@ class KapeLuz : JPanel() {
             println("Quality set to index: $settingExampleDropdownIdx")
         })
 
+        options.add(UIText(400, 415, "Field of View (FOV):", 14f, Color.LIGHT_GRAY))
+        options.add(UISlider(400, 435, 380, 40, 30f, 110f, fov.toFloat(), "FOV") { newValue ->
+            fov = newValue.toDouble()
+            saveOptions()
+        })
+
         scrollPanel.addChild(UIButton(10, 50*0, 380, 41, " Accessiblility", textAlign = TextAlign.LEFT, padding = 10, tooltip = "Accessiblility", fontSize = 30f) {
             println("page: Accessiblility")
         })

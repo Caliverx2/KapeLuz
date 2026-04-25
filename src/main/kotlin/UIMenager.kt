@@ -1143,7 +1143,115 @@ class UIProgressBar(
     }
 }
 
-//zoba tutaj dodaje scroll w 3 minuty speedrun btw
+class UISlider(
+    x: Int, y: Int, width: Int, height: Int,
+    var minVal: Float = 0f,
+    var maxVal: Float = 100f,
+    var currentVal: Float = 50f,
+    var text: String = "Slider",
+    var fontSize: Float = 20f,
+    var onValueChanged: (Float) -> Unit = {}
+) : UIComponent() {
+    var isEditingText = false
+    var cursorIndex = 0
+    var selectionStartIndex = 0
+    private var initialText = ""
+    private var initialVal = 0f
+    private var initialFontSize = 20f
+
+    init {
+        this.x = x; this.y = y; this.width = width; this.height = height
+        saveInitialState()
+    }
+
+    override fun saveInitialState() {
+        super.saveInitialState()
+        initialText = text
+        initialVal = currentVal
+        initialFontSize = fontSize
+    }
+
+    override fun restoreInitialState() {
+        super.restoreInitialState()
+        text = initialText
+        currentVal = initialVal
+        fontSize = initialFontSize
+        isEditingText = false
+    }
+
+    override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
+        if (!isVisible) return
+
+        // 1. Tło (Ciemnoszary)
+        g.color = Color(60, 60, 60)
+        g.fillRect(x, y, width, height)
+
+        // 2. Suwak (Jasnoszary, wąski a wysoki)
+        val progress = ((currentVal - minVal) / (maxVal - minVal)).coerceIn(0f, 1f)
+        val handleW = 10
+        val handleX = x + (progress * (width - handleW)).toInt()
+
+        g.color = Color(200, 200, 200)
+        g.fillRect(handleX, y, handleW, height)
+        g.color = Color.WHITE
+        g.drawRect(handleX, y, handleW, height)
+
+        // 3. Obramowanie całego obiektu
+        g.color = Color.WHITE
+        g.drawRect(x, y, width, height)
+
+        // 4. Napis na środku
+        g.font = game.fpsFont.deriveFont(fontSize)
+        val fm = g.fontMetrics
+        val displayText = if (isEditingText) text else "$text: ${currentVal.toInt()}"
+        val tw = fm.stringWidth(displayText)
+        val tx = x + (width - tw) / 2
+        val ty = y + (height + fm.ascent) / 2 - 2
+
+        g.color = Color.WHITE
+        g.drawString(displayText, tx, ty)
+
+        if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorX = tx + fm.stringWidth(text.substring(0, cursorIndex))
+            g.fillRect(cursorX, ty - fm.ascent, 2, fm.height)
+        }
+    }
+
+    private fun updateValueFromMouse(mouseX: Int) {
+        val progress = ((mouseX - x).toFloat() / width.toFloat()).coerceIn(0f, 1f)
+        currentVal = minVal + progress * (maxVal - minVal)
+        onValueChanged(currentVal)
+    }
+
+    override fun onClick(clickX: Int, clickY: Int): Boolean {
+        if (isMouseOver(clickX, clickY) && isEnabled) {
+            updateValueFromMouse(clickX)
+            return true
+        }
+        return false
+    }
+
+    override fun onPress(x: Int, y: Int): Boolean {
+        if (isMouseOver(x, y) && isEnabled) {
+            updateValueFromMouse(x)
+            return true
+        }
+        return false
+    }
+
+    override fun onDrag(x: Int, y: Int) {
+        if (isEnabled) updateValueFromMouse(x)
+    }
+
+    override fun onKey(e: KeyEvent): Boolean {
+        if (!isEditingText) return false
+        // Używamy uproszczonej logiki edycji tekstu
+        if (e.id == KeyEvent.KEY_TYPED && e.keyChar.code >= 32) { text += e.keyChar; cursorIndex++; return true }
+        if (e.keyCode == KeyEvent.VK_BACK_SPACE && text.isNotEmpty()) { text = text.dropLast(1); cursorIndex--; return true }
+        if (e.keyCode == KeyEvent.VK_ENTER) { isEditingText = false; return true }
+        return false
+    }
+}
 
 class UIScrollPanel(
     x: Int, y: Int, width: Int, height: Int
@@ -1601,6 +1709,10 @@ class UIManager(val game: KapeLuz) {
             addNewComponent(UIProgressBar(spawnX, spawnY, 200, 30))
             contextMenuVisible = false
         })
+        contextMenuButtons.add(UIButton(0, btnH * 6, btnW, btnH, "Add Slider", fontSize = 20f) {
+            addNewComponent(UISlider(spawnX, spawnY, 200, 30))
+            contextMenuVisible = false
+        })
         inspectorPanel.isVisible = false
     }
 
@@ -1633,6 +1745,7 @@ class UIManager(val game: KapeLuz) {
             }
             if (selectedComponent is UICheckbox) (selectedComponent as UICheckbox).isEditingText = false
             if (selectedComponent is UIProgressBar) (selectedComponent as UIProgressBar).isEditingText = false
+            if (selectedComponent is UISlider) (selectedComponent as UISlider).isEditingText = false
             selectedComponent = null
             activeDropdown = null
             inspectorPanel.isVisible = false
@@ -1705,6 +1818,15 @@ class UIManager(val game: KapeLuz) {
                     rebuildInspector()
                 }.apply { fontSize = 16f })
                 currY += 40
+            }
+            is UISlider -> {
+                addField("Label", comp.text) { comp.text = it }
+                addField("Font Size", comp.fontSize.toString()) { comp.fontSize = it.toFloatOrNull() ?: comp.fontSize }
+                addField("Min", comp.minVal.toString()) { comp.minVal = it.toFloatOrNull() ?: comp.minVal }
+                addField("Max", comp.maxVal.toString()) { comp.maxVal = it.toFloatOrNull() ?: comp.maxVal }
+                addField("Value", comp.currentVal.toString()) {
+                    comp.currentVal = (it.toFloatOrNull() ?: comp.currentVal).coerceIn(comp.minVal, comp.maxVal)
+                }
             }
             is UIDropdown -> {
                 addField("Selected Index", comp.selectedIndex.toString()) { 
@@ -1788,6 +1910,8 @@ class UIManager(val game: KapeLuz) {
                     sb.append("UICheckbox(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", ${comp.checked}) { checked -> }\n")
                 } else if (comp is UIProgressBar) {
                     sb.append("UIProgressBar(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, progress = ${comp.progress}f, text = \"${comp.text}\", fillColor = Color(${comp.fillColor.rgb}), mode = ProgressBarMode.${comp.mode}, fontSize = ${comp.fontSize}f)\n")
+                } else if (comp is UISlider) {
+                    sb.append("UISlider(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, minVal = ${comp.minVal}f, maxVal = ${comp.maxVal}f, currentVal = ${comp.currentVal}f, text = \"${comp.text}\", fontSize = ${comp.fontSize}f) { val -> }\n")
                 }
             }
         }
@@ -2123,6 +2247,7 @@ class UIManager(val game: KapeLuz) {
                 is UIDropdown -> old.isExpanded = false
                 is UICheckbox -> old.isEditingText = false
                 is UIProgressBar -> old.isEditingText = false
+                is UISlider -> old.isEditingText = false
             }
             selectedComponent = null
             activeDropdown = null
@@ -2148,6 +2273,7 @@ class UIManager(val game: KapeLuz) {
                 is UIDropdown -> old.isExpanded = false
                 is UICheckbox -> old.isEditingText = false
                 is UIProgressBar -> old.isEditingText = false
+                is UISlider -> old.isEditingText = false
             }
         }
 
@@ -2185,6 +2311,10 @@ class UIManager(val game: KapeLuz) {
                     comp.cursorIndex = comp.text.length
                 }
                 is UIProgressBar -> {
+                    comp.isEditingText = true
+                    comp.cursorIndex = comp.text.length
+                }
+                is UISlider -> {
                     comp.isEditingText = true
                     comp.cursorIndex = comp.text.length
                 }

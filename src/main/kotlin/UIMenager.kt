@@ -31,6 +31,9 @@ abstract class UIComponent {
     var initialW: Int = 0
     var initialH: Int = 0
 
+    open val visualX: Int get() = x
+    open val visualY: Int get() = y
+
     open fun saveInitialState() {
         initialX = x; initialY = y; initialW = width; initialH = height
     }
@@ -48,9 +51,9 @@ abstract class UIComponent {
     open fun onDrag(x: Int, y: Int) {}
     open fun onKey(e: KeyEvent): Boolean = false
 
-    // Szybka metoda sprawdzania kolizji bez tworzenia obiektów Rectangle
-    fun isMouseOver(mouseX: Int, mouseY: Int): Boolean {
-        return isVisible && mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + height
+    // Metoda sprawdzania kolizji (otwarta do nadpisania dla UIText)
+    open fun isMouseOver(mouseX: Int, mouseY: Int): Boolean {
+        return isVisible && mouseX >= visualX && mouseX <= visualX + width && mouseY >= visualY && mouseY <= visualY + height
     }
 }
 
@@ -58,9 +61,94 @@ enum class TextAlign {
     LEFT, CENTER, RIGHT
 }
 
+class TextEditorState(initialText: String, var onTextChanged: (() -> Unit)? = null) {
+    var text: String = initialText
+        set(value) {
+            field = value
+            if (cursorIndex > field.length) cursorIndex = field.length
+            if (selectionStartIndex > field.length) selectionStartIndex = field.length
+            onTextChanged?.invoke()
+        }
+    var cursorIndex: Int = initialText.length
+    var selectionStartIndex: Int = initialText.length
+    var isEditing: Boolean = false
+
+    fun deleteSelection() {
+        if (selectionStartIndex != cursorIndex) {
+            val start = min(selectionStartIndex, cursorIndex)
+            val end = max(selectionStartIndex, cursorIndex)
+            text = text.removeRange(start, end)
+            cursorIndex = start
+            selectionStartIndex = cursorIndex
+        }
+    }
+
+    fun handleKey(e: KeyEvent): Boolean {
+        if (!isEditing) return false
+
+        if (e.id == KeyEvent.KEY_PRESSED) {
+            when (e.keyCode) {
+                KeyEvent.VK_ENTER -> {
+                    if (e.isShiftDown || e.isControlDown) {
+                        deleteSelection()
+                        text = text.substring(0, cursorIndex) + "\n" + text.substring(cursorIndex)
+                        cursorIndex++
+                        selectionStartIndex = cursorIndex
+                    } else {
+                        isEditing = false
+                    }
+                    return true
+                }
+                KeyEvent.VK_ESCAPE -> {
+                    isEditing = false
+                    return true
+                }
+                KeyEvent.VK_BACK_SPACE -> {
+                    if (selectionStartIndex != cursorIndex) {
+                        deleteSelection()
+                    } else if (cursorIndex > 0) {
+                        val oldCursor = cursorIndex
+                        cursorIndex--
+                        selectionStartIndex = cursorIndex
+                        text = text.removeRange(oldCursor - 1, oldCursor)
+                    }
+                    return true
+                }
+                KeyEvent.VK_LEFT -> {
+                    if (cursorIndex > 0) cursorIndex--
+                    selectionStartIndex = cursorIndex
+                    return true
+                }
+                KeyEvent.VK_RIGHT -> {
+                    if (cursorIndex < text.length) cursorIndex++
+                    selectionStartIndex = cursorIndex
+                    return true
+                }
+            }
+        } else if (e.id == KeyEvent.KEY_TYPED) {
+            val char = e.keyChar
+            if (char.code >= 32 && char.code != 127) {
+                deleteSelection()
+                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
+                cursorIndex++
+                selectionStartIndex = cursorIndex
+                return true
+            }
+        }
+        return false
+    }
+
+    fun reset(newText: String) {
+        text = newText
+        cursorIndex = text.length
+        selectionStartIndex = text.length
+        isEditing = false
+    }
+}
+
 class UIButton(
     x: Int, y: Int, width: Int, height: Int,
-    var text: String = "Button",
+    initialText: String = "Button",
     var textColor: Color = Color.WHITE,
     var texture: BufferedImage? = null,
     var textAlign: TextAlign = TextAlign.CENTER,
@@ -70,10 +158,12 @@ class UIButton(
     var icon: BufferedImage? = null,
     var action: () -> Unit
 ) : UIComponent() {
-    var isEditingText = false
-    var cursorIndex = 0
-    var selectionStartIndex = 0
-    private var initialText: String = ""
+    val editor = TextEditorState(initialText)
+    var text: String 
+        get() = editor.text
+        set(v) { editor.text = v }
+
+    private var savedText: String = ""
     private var initialTextColor: Color = Color.WHITE
 
     init {
@@ -86,15 +176,14 @@ class UIButton(
 
     override fun saveInitialState() {
         super.saveInitialState()
-        initialText = text
+        savedText = text
         initialTextColor = textColor
     }
 
     override fun restoreInitialState() {
         super.restoreInitialState()
-        text = initialText
+        editor.reset(savedText)
         textColor = initialTextColor
-        isEditingText = false
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -111,7 +200,7 @@ class UIButton(
         }
 
         // Podświetlenie tła podczas edycji tekstu
-        if (isEditingText) {
+        if (editor.isEditing) {
             g.color = Color(255, 255, 255, 50)
             g.fillRect(x, y, width, height)
             g.color = Color.CYAN
@@ -145,11 +234,11 @@ class UIButton(
         val drawY = y + (height + textHeight) / 2 - 4
 
         // Rysowanie zaznaczenia tekstu wewnątrz przycisku
-        if (isEditingText && selectionStartIndex != cursorIndex) {
-            val start = min(selectionStartIndex, cursorIndex)
-            val end = max(selectionStartIndex, cursorIndex)
-            val selX = drawX + fm.stringWidth(text.substring(0, start))
-            val selW = fm.stringWidth(text.substring(start, end))
+        if (editor.isEditing && editor.selectionStartIndex != editor.cursorIndex) {
+            val start = min(editor.selectionStartIndex, editor.cursorIndex)
+            val end = max(editor.selectionStartIndex, editor.cursorIndex)
+            val selX = drawX + fm.stringWidth(editor.text.substring(0, start))
+            val selW = fm.stringWidth(editor.text.substring(start, end))
             g.color = Color(0, 120, 215, 150)
             g.fillRect(selX, drawY - textHeight, selW, fm.height)
         }
@@ -158,8 +247,8 @@ class UIButton(
         g.drawString(text, drawX, drawY)
 
         // Rysowanie kursora podczas edycji
-        if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
-            val cursorPosX = drawX + fm.stringWidth(text.substring(0, cursorIndex))
+        if (editor.isEditing && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorPosX = drawX + fm.stringWidth(editor.text.substring(0, editor.cursorIndex))
             g.color = Color.WHITE
             g.fillRect(cursorPosX, drawY - textHeight, 2, fm.height)
         }
@@ -175,89 +264,71 @@ class UIButton(
         return false
     }
 
-    override fun onKey(e: KeyEvent): Boolean {
-        if (!isEditingText) return false
-        if (e.id == KeyEvent.KEY_PRESSED) {
-            when (e.keyCode) {
-                KeyEvent.VK_ENTER, KeyEvent.VK_ESCAPE -> {
-                    isEditingText = false
-                    return true
-                }
-                KeyEvent.VK_BACK_SPACE -> {
-                    if (selectionStartIndex != cursorIndex) {
-                        val start = min(selectionStartIndex, cursorIndex)
-                        val end = max(selectionStartIndex, cursorIndex)
-                        text = text.removeRange(start, end)
-                        cursorIndex = start
-                        selectionStartIndex = cursorIndex
-                    } else if (cursorIndex > 0) {
-                        text = text.removeRange(cursorIndex - 1, cursorIndex)
-                        cursorIndex--
-                        selectionStartIndex = cursorIndex
-                    }
-                    return true
-                }
-            }
-        } else if (e.id == KeyEvent.KEY_TYPED) {
-            val char = e.keyChar
-            if (char.code >= 32 && char.code != 127) {
-                // Jeśli jest zaznaczenie, usuń je przed wpisaniem nowego znaku
-                if (selectionStartIndex != cursorIndex) {
-                    val start = min(selectionStartIndex, cursorIndex)
-                    val end = max(selectionStartIndex, cursorIndex)
-                    text = text.removeRange(start, end)
-                    cursorIndex = start
-                }
-                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
-                cursorIndex++
-                selectionStartIndex = cursorIndex
-                return true
-            }
-        }
-        return false
-    }
+    override fun onKey(e: KeyEvent): Boolean = editor.handleKey(e)
 }
 
 class UIText(
     x: Int, y: Int,
-    var text: String,
+    initialText: String,
     var fontSize: Float,
     var color: Color,
     var centered: Boolean = false,
     tooltip: String? = null
 ) : UIComponent() {
-    var isEditingText = false
-    var cursorIndex = 0
-    var selectionStartIndex = 0
-    private var initialText: String = ""
+    // Flaga informująca, że wymiary wymagają przeliczenia (np. po zmianie tekstu)
+    private var needsSizeUpdate = true
+
+    val editor = TextEditorState(initialText) {
+        needsSizeUpdate = true
+    }
+
+    var text: String 
+        get() = editor.text
+        set(v) { 
+            editor.text = v
+            needsSizeUpdate = true
+        }
+
+    private var savedText: String = ""
     private var initialColor: Color = Color.WHITE
 
     init {
         this.x = x
         this.y = y
         this.tooltipText = tooltip
-        this.initialText = text
+        this.savedText = text
         this.initialColor = color
     }
 
     override fun saveInitialState() {
         super.saveInitialState()
-        initialText = text
+        savedText = text
         initialColor = color
     }
 
     override fun restoreInitialState() {
         super.restoreInitialState()
-        text = initialText
+        editor.reset(savedText)
         color = initialColor
-        isEditingText = false
     }
+
+    override val visualX: Int get() = if (centered) x - width / 2 else x
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
         if (!isVisible) return
         g.font = game.fpsFont.deriveFont(fontSize)
-        g.color = color
+
         val fm = g.fontMetrics
+
+        // Auto-sizing: aktualizujemy width i height na podstawie realnych wymiarów czcionki
+        if (needsSizeUpdate) {
+            val lines = text.split("\n")
+            width = lines.maxOfOrNull { fm.stringWidth(it) } ?: 0
+            height = lines.size * fm.height
+            needsSizeUpdate = false
+        }
+
+        g.color = color
 
         val textWidth = fm.stringWidth(text)
         val textHeight = fm.ascent
@@ -265,61 +336,26 @@ class UIText(
         val drawY = y + textHeight
 
         // Rysowanie zaznaczenia
-        if (isEditingText && selectionStartIndex != cursorIndex) {
-            val start = min(selectionStartIndex, cursorIndex)
-            val end = max(selectionStartIndex, cursorIndex)
-            val selX = drawX + fm.stringWidth(text.substring(0, start))
-            val selW = fm.stringWidth(text.substring(start, end))
+        if (editor.isEditing && editor.selectionStartIndex != editor.cursorIndex) {
+            val start = min(editor.selectionStartIndex, editor.cursorIndex)
+            val end = max(editor.selectionStartIndex, editor.cursorIndex)
+            val selX = drawX + fm.stringWidth(editor.text.substring(0, start))
+            val selW = fm.stringWidth(editor.text.substring(start, end))
             g.color = Color(0, 120, 215, 150)
             g.fillRect(selX, drawY - textHeight, selW, fm.height)
         }
 
         g.color = color
-        g.drawString(text, drawX, drawY)
+        g.drawString(editor.text, drawX, drawY)
 
         // Rysowanie kursora
-        if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
-            val cursorPosX = drawX + fm.stringWidth(text.substring(0, cursorIndex))
+        if (editor.isEditing && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorPosX = drawX + fm.stringWidth(editor.text.substring(0, editor.cursorIndex))
             g.color = Color.WHITE
             g.fillRect(cursorPosX, drawY - textHeight, 2, fm.height)
         }
     }
-
-    override fun onKey(e: KeyEvent): Boolean {
-        if (!isEditingText) return false
-        if (e.id == KeyEvent.KEY_PRESSED) {
-            when (e.keyCode) {
-                KeyEvent.VK_ENTER, KeyEvent.VK_ESCAPE -> { isEditingText = false; return true }
-                KeyEvent.VK_BACK_SPACE -> {
-                    if (selectionStartIndex != cursorIndex) {
-                        val start = min(selectionStartIndex, cursorIndex)
-                        val end = max(selectionStartIndex, cursorIndex)
-                        text = text.removeRange(start, end)
-                        cursorIndex = start
-                        selectionStartIndex = cursorIndex
-                    } else if (cursorIndex > 0) {
-                        text = text.removeRange(cursorIndex - 1, cursorIndex)
-                        cursorIndex--; selectionStartIndex = cursorIndex
-                    }
-                    return true
-                }
-            }
-        } else if (e.id == KeyEvent.KEY_TYPED) {
-            val char = e.keyChar
-            if (char.code >= 32 && char.code != 127) {
-                if (selectionStartIndex != cursorIndex) {
-                    val start = min(selectionStartIndex, cursorIndex)
-                    val end = max(selectionStartIndex, cursorIndex)
-                    text = text.removeRange(start, end)
-                    cursorIndex = start
-                }
-                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
-                cursorIndex++; selectionStartIndex = cursorIndex
-                return true
-            }
-        }
-        return false
-    }
+    override fun onKey(e: KeyEvent): Boolean = editor.handleKey(e)
 }
 
 class UITextField(
@@ -430,7 +466,7 @@ class UITextField(
         } else {
             targetScrollOffset = 0
         }
-        
+
         targetScrollOffset = targetScrollOffset.coerceIn(0, max(0, currentLineWidth - visibleWidth))
 
         currentScrollOffset += (targetScrollOffset - currentScrollOffset) * 0.3
@@ -542,6 +578,15 @@ class UITextField(
 
         if (e.id == KeyEvent.KEY_PRESSED) {
             when (e.keyCode) {
+                KeyEvent.VK_ENTER -> {
+                    if (isShift || isCtrl) {
+                        deleteSelection()
+                        text = text.substring(0, cursorIndex) + "\n" + text.substring(cursorIndex)
+                        cursorIndex++
+                        selectionStartIndex = cursorIndex
+                        return true
+                    }
+                }
                 KeyEvent.VK_LEFT -> {
                     if (cursorIndex > 0) cursorIndex--
                     if (!isShift) selectionStartIndex = cursorIndex
@@ -908,14 +953,18 @@ class UIDropdown(
 
 class UICheckbox(
     x: Int, y: Int, width: Int, height: Int,
-    var text: String = "Checkbox",
+    initialText: String = "Checkbox",
     var checked: Boolean = false,
+    var fontSize: Float = 24f,
     var onToggle: (Boolean) -> Unit = {}
 ) : UIComponent() {
-    var isEditingText = false
-    var cursorIndex = 0
-    var selectionStartIndex = 0
-    private var initialText: String = ""
+    val editor = TextEditorState(initialText)
+    var text: String
+        get() = editor.text
+        set(v) { editor.text = v }
+
+    private var savedText: String = ""
+    private var initialFontSize: Float = 24f
     private var initialChecked: Boolean = false
 
     init {
@@ -923,21 +972,23 @@ class UICheckbox(
         this.y = y
         this.width = width
         this.height = height
-        this.initialText = text
+        this.savedText = text
         this.initialChecked = checked
+        this.initialFontSize = fontSize
     }
 
     override fun saveInitialState() {
         super.saveInitialState()
-        initialText = text
+        savedText = text
         initialChecked = checked
+        initialFontSize = fontSize
     }
 
     override fun restoreInitialState() {
         super.restoreInitialState()
-        text = initialText
+        editor.reset(savedText)
         checked = initialChecked
-        isEditingText = false
+        fontSize = initialFontSize
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -949,10 +1000,31 @@ class UICheckbox(
         g.fillRect(x, y, width, height)
 
         // Etykieta tekstowa
-        g.font = game.fpsFont.deriveFont(24f)
+        g.font = game.fpsFont.deriveFont(fontSize)
         val fm = g.fontMetrics
+        val textHeight = fm.ascent
+        val drawX = x + 10
+        val drawY = y + (height + textHeight) / 2 - 2
+
+        // Rysowanie zaznaczenia tekstu
+        if (editor.isEditing && editor.selectionStartIndex != editor.cursorIndex) {
+            val start = min(editor.selectionStartIndex, editor.cursorIndex)
+            val end = max(editor.selectionStartIndex, editor.cursorIndex)
+            val selX = drawX + fm.stringWidth(editor.text.substring(0, start))
+            val selW = fm.stringWidth(editor.text.substring(start, end))
+            g.color = Color(0, 120, 215, 150)
+            g.fillRect(selX, drawY - textHeight, selW, fm.height)
+        }
+
         g.color = Color.WHITE
-        g.drawString(text, x + 10, y + (height + fm.ascent) / 2 - 2)
+        g.drawString(text, drawX, drawY)
+
+        // Rysowanie kursora podczas edycji
+        if (editor.isEditing && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorPosX = drawX + fm.stringWidth(editor.text.substring(0, editor.cursorIndex))
+            g.color = Color.WHITE
+            g.fillRect(cursorPosX, drawY - textHeight, 2, fm.height)
+        }
 
         // Wizualizacja suwaka (Toggle Switch) po prawej
         val swWidth = 45
@@ -987,46 +1059,7 @@ class UICheckbox(
         return false
     }
 
-    override fun onKey(e: KeyEvent): Boolean {
-        if (!isEditingText) return false
-        if (e.id == KeyEvent.KEY_PRESSED) {
-            when (e.keyCode) {
-                KeyEvent.VK_ENTER, KeyEvent.VK_ESCAPE -> {
-                    isEditingText = false
-                    return true
-                }
-                KeyEvent.VK_BACK_SPACE -> {
-                    if (selectionStartIndex != cursorIndex) {
-                        val start = min(selectionStartIndex, cursorIndex)
-                        val end = max(selectionStartIndex, cursorIndex)
-                        text = text.removeRange(start, end)
-                        cursorIndex = start
-                        selectionStartIndex = cursorIndex
-                    } else if (cursorIndex > 0) {
-                        text = text.removeRange(cursorIndex - 1, cursorIndex)
-                        cursorIndex--
-                        selectionStartIndex = cursorIndex
-                    }
-                    return true
-                }
-            }
-        } else if (e.id == KeyEvent.KEY_TYPED) {
-            val char = e.keyChar
-            if (char.code >= 32 && char.code != 127) {
-                if (selectionStartIndex != cursorIndex) {
-                    val start = min(selectionStartIndex, cursorIndex)
-                    val end = max(selectionStartIndex, cursorIndex)
-                    text = text.removeRange(start, end)
-                    cursorIndex = start
-                }
-                text = text.substring(0, cursorIndex) + char + text.substring(cursorIndex)
-                cursorIndex++
-                selectionStartIndex = cursorIndex
-                return true
-            }
-        }
-        return false 
-    }
+    override fun onKey(e: KeyEvent): Boolean = editor.handleKey(e)
 }
 
 enum class ProgressBarMode {
@@ -1036,18 +1069,20 @@ enum class ProgressBarMode {
 class UIProgressBar(
     x: Int, y: Int, width: Int, height: Int,
     var progress: Float = 0.5f, // 0.0 to 1.0
-    var text: String = "",
+    initialText: String = "",
     var fillColor: Color = Color(0x2ecc71), // Zielony
     var mode: ProgressBarMode = ProgressBarMode.NONE,
     var fontSize: Float = 20f,
     var progressProvider: (() -> Float)? = null,
     var textProvider: (() -> String)? = null
 ) : UIComponent() {
-    var isEditingText = false
-    var cursorIndex = 0
-    var selectionStartIndex = 0
+    val editor = TextEditorState(initialText)
+    var text: String
+        get() = editor.text
+        set(v) { editor.text = v }
+
+    private var savedText = ""
     private var initialProgress = 0.5f
-    private var initialText = ""
     private var initialFillColor = Color.GREEN
     private var initialMode = ProgressBarMode.NONE
     private var initialFontSize = 20f
@@ -1060,7 +1095,7 @@ class UIProgressBar(
     override fun saveInitialState() {
         super.saveInitialState()
         initialProgress = progress
-        initialText = text
+        savedText = text
         initialFillColor = fillColor
         initialMode = mode
         initialFontSize = fontSize
@@ -1069,11 +1104,10 @@ class UIProgressBar(
     override fun restoreInitialState() {
         super.restoreInitialState()
         progress = initialProgress
-        text = initialText
+        editor.reset(savedText)
         fillColor = initialFillColor
         mode = initialMode
         fontSize = initialFontSize
-        isEditingText = false
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -1116,7 +1150,7 @@ class UIProgressBar(
         g.drawRect(x, y, width, height)
 
         // Napis na środku
-        if (displayText.isNotEmpty() || isEditingText) {
+        if (displayText.isNotEmpty() || editor.isEditing) {
             g.font = game.fpsFont.deriveFont(fontSize)
             val fm = g.fontMetrics
             val tw = fm.stringWidth(displayText)
@@ -1126,21 +1160,13 @@ class UIProgressBar(
             g.color = Color.WHITE
             g.drawString(displayText, tx, ty)
 
-            if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
-                val cursorX = tx + fm.stringWidth(displayText.substring(0, cursorIndex))
+            if (editor.isEditing && (System.currentTimeMillis() / 500) % 2 == 0L) {
+                val cursorX = tx + fm.stringWidth(displayText.substring(0, editor.cursorIndex))
                 g.fillRect(cursorX, ty - fm.ascent, 2, fm.height)
             }
         }
     }
-
-    override fun onKey(e: KeyEvent): Boolean {
-        if (!isEditingText) return false
-        // Używamy standardowej logiki wpisywania tekstu (uproszczone dla czytelności diffa)
-        if (e.id == KeyEvent.KEY_TYPED && e.keyChar.code >= 32) { text += e.keyChar; cursorIndex++; return true }
-        if (e.keyCode == KeyEvent.VK_BACK_SPACE && text.isNotEmpty()) { text = text.dropLast(1); cursorIndex--; return true }
-        if (e.keyCode == KeyEvent.VK_ENTER) { isEditingText = false; return true }
-        return false
-    }
+    override fun onKey(e: KeyEvent): Boolean = editor.handleKey(e)
 }
 
 class UISlider(
@@ -1148,14 +1174,16 @@ class UISlider(
     var minVal: Float = 0f,
     var maxVal: Float = 100f,
     var currentVal: Float = 50f,
-    var text: String = "Slider",
+    initialText: String = "Slider",
     var fontSize: Float = 20f,
     var onValueChanged: (Float) -> Unit = {}
 ) : UIComponent() {
-    var isEditingText = false
-    var cursorIndex = 0
-    var selectionStartIndex = 0
-    private var initialText = ""
+    val editor = TextEditorState(initialText)
+    var text: String
+        get() = editor.text
+        set(v) { editor.text = v }
+
+    private var savedText = ""
     private var initialVal = 0f
     private var initialFontSize = 20f
 
@@ -1166,17 +1194,16 @@ class UISlider(
 
     override fun saveInitialState() {
         super.saveInitialState()
-        initialText = text
+        savedText = text
         initialVal = currentVal
         initialFontSize = fontSize
     }
 
     override fun restoreInitialState() {
         super.restoreInitialState()
-        text = initialText
+        editor.reset(savedText)
         currentVal = initialVal
         fontSize = initialFontSize
-        isEditingText = false
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -1203,7 +1230,7 @@ class UISlider(
         // 4. Napis na środku
         g.font = game.fpsFont.deriveFont(fontSize)
         val fm = g.fontMetrics
-        val displayText = if (isEditingText) text else "$text: ${currentVal.toInt()}"
+        val displayText = if (editor.isEditing) text else "$text: ${currentVal.toInt()}"
         val tw = fm.stringWidth(displayText)
         val tx = x + (width - tw) / 2
         val ty = y + (height + fm.ascent) / 2 - 2
@@ -1211,8 +1238,8 @@ class UISlider(
         g.color = Color.WHITE
         g.drawString(displayText, tx, ty)
 
-        if (isEditingText && (System.currentTimeMillis() / 500) % 2 == 0L) {
-            val cursorX = tx + fm.stringWidth(text.substring(0, cursorIndex))
+        if (editor.isEditing && (System.currentTimeMillis() / 500) % 2 == 0L) {
+            val cursorX = tx + fm.stringWidth(text.substring(0, editor.cursorIndex))
             g.fillRect(cursorX, ty - fm.ascent, 2, fm.height)
         }
     }
@@ -1243,14 +1270,7 @@ class UISlider(
         if (isEnabled) updateValueFromMouse(x)
     }
 
-    override fun onKey(e: KeyEvent): Boolean {
-        if (!isEditingText) return false
-        // Używamy uproszczonej logiki edycji tekstu
-        if (e.id == KeyEvent.KEY_TYPED && e.keyChar.code >= 32) { text += e.keyChar; cursorIndex++; return true }
-        if (e.keyCode == KeyEvent.VK_BACK_SPACE && text.isNotEmpty()) { text = text.dropLast(1); cursorIndex--; return true }
-        if (e.keyCode == KeyEvent.VK_ENTER) { isEditingText = false; return true }
-        return false
-    }
+    override fun onKey(e: KeyEvent): Boolean = editor.handleKey(e)
 }
 
 class UIScrollPanel(
@@ -1702,7 +1722,7 @@ class UIManager(val game: KapeLuz) {
             contextMenuVisible = false
         })
         contextMenuButtons.add(UIButton(0, btnH * 4, btnW, btnH, "Add Checkbox", fontSize = 20f) {
-            addNewComponent(UICheckbox(spawnX, spawnY, 200, 40, "New Checkbox") {})
+            addNewComponent(UICheckbox(spawnX, spawnY, 200, 40, "New Checkbox"))
             contextMenuVisible = false
         })
         contextMenuButtons.add(UIButton(0, btnH * 5, btnW, btnH, "Add Progress", fontSize = 20f) {
@@ -1716,9 +1736,22 @@ class UIManager(val game: KapeLuz) {
         inspectorPanel.isVisible = false
     }
 
+    private fun clearEditState(comp: UIComponent?) {
+        when (comp) {
+            is UIButton -> comp.editor.isEditing = false
+            is UIText -> comp.editor.isEditing = false
+            is UITextField -> comp.isFocused = false
+            is UIDropdown -> comp.isExpanded = false
+            is UICheckbox -> comp.editor.isEditing = false
+            is UIProgressBar -> comp.editor.isEditing = false
+            is UISlider -> comp.editor.isEditing = false
+        }
+    }
+
     private fun addNewComponent(comp: UIComponent) {
         val currentPanel = panels[game.gameState]
         if (currentPanel != null) {
+            clearEditState(selectedComponent) // Wyczyść stary fokus przed dodaniem nowego
             comp.isTemporary = true
             comp.saveInitialState()
             currentPanel.add(comp)
@@ -1740,12 +1773,7 @@ class UIManager(val game: KapeLuz) {
             }
             exportWindowVisible = false
             contextMenuVisible = false
-            if (selectedComponent is UIButton) {
-                (selectedComponent as UIButton).isEditingText = false
-            }
-            if (selectedComponent is UICheckbox) (selectedComponent as UICheckbox).isEditingText = false
-            if (selectedComponent is UIProgressBar) (selectedComponent as UIProgressBar).isEditingText = false
-            if (selectedComponent is UISlider) (selectedComponent as UISlider).isEditingText = false
+            clearEditState(selectedComponent)
             selectedComponent = null
             activeDropdown = null
             inspectorPanel.isVisible = false
@@ -1800,6 +1828,7 @@ class UIManager(val game: KapeLuz) {
             }
             is UICheckbox -> {
                 addField("Label", comp.text) { comp.text = it }
+                addField("Font Size", comp.fontSize.toString()) { comp.fontSize = it.toFloatOrNull() ?: comp.fontSize }
                 inspectorPanel.addChild(UIButton(10, currY, 230, 30, "State: ${comp.checked}") {
                     comp.checked = !comp.checked
                     rebuildInspector() // Odśwież napis na przycisku
@@ -1905,9 +1934,9 @@ class UIManager(val game: KapeLuz) {
                 } else if (comp is UITextField) {
                     sb.append("UITextField(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", \"${comp.placeholder}\")\n")
                 } else if (comp is UIDropdown) {
-                    sb.append("UIDropdown(this, ${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, mutableListOf(${comp.options.joinToString { "\"$it\"" }}), ${comp.selectedIndex}) { index -> }\n")
+                    sb.append("UIDropdown(this, ${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, mutableListOf(${comp.options.joinToString { "\"$it\"" }}), ${comp.selectedIndex}) { }\n")
                 } else if (comp is UICheckbox) {
-                    sb.append("UICheckbox(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", ${comp.checked}) { checked -> }\n")
+                    sb.append("UICheckbox(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, \"${comp.text}\", ${comp.checked}, fontSize = ${comp.fontSize}f) { }\n")
                 } else if (comp is UIProgressBar) {
                     sb.append("UIProgressBar(${comp.x}, ${comp.y}, ${comp.width}, ${comp.height}, progress = ${comp.progress}f, text = \"${comp.text}\", fillColor = Color(${comp.fillColor.rgb}), mode = ProgressBarMode.${comp.mode}, fontSize = ${comp.fontSize}f)\n")
                 } else if (comp is UISlider) {
@@ -1945,20 +1974,23 @@ class UIManager(val game: KapeLuz) {
             if (isSelected || isHovered) {
                 g.color = if (isSelected) Color.YELLOW else Color(255, 255, 255, 150)
                 g.stroke = BasicStroke(if (isSelected) 2f else 1f)
-                g.drawRect(comp.x - 1, comp.y - 1, comp.width + 2, comp.height + 2)
+                
+                val vx = comp.visualX
+                val vy = comp.visualY
+                g.drawRect(vx - 1, vy - 1, comp.width + 2, comp.height + 2)
 
                 // Rysowanie uchwytów (handles) na rogach i krawędziach
                 val hSize = 8
                 val hOffset = hSize / 2
                 val corners = arrayOf(
-                    Point(comp.x, comp.y), // TL
-                    Point(comp.x + comp.width, comp.y), // TR
-                    Point(comp.x, comp.y + comp.height), // BL
-                    Point(comp.x + comp.width, comp.y + comp.height), // BR
-                    Point(comp.x + comp.width / 2, comp.y), // T
-                    Point(comp.x + comp.width / 2, comp.y + comp.height), // B
-                    Point(comp.x, comp.y + comp.height / 2), // L
-                    Point(comp.x + comp.width, comp.y + comp.height / 2) // R
+                    Point(vx, vy), // TL
+                    Point(vx + comp.width, vy), // TR
+                    Point(vx, vy + comp.height), // BL
+                    Point(vx + comp.width, vy + comp.height), // BR
+                    Point(vx + comp.width / 2, vy), // T
+                    Point(vx + comp.width / 2, vy + comp.height), // B
+                    Point(vx, vy + comp.height / 2), // L
+                    Point(vx + comp.width, vy + comp.height / 2) // R
                 )
 
                 g.color = if (isSelected) Color.YELLOW else Color.WHITE
@@ -1971,7 +2003,7 @@ class UIManager(val game: KapeLuz) {
             } else {
                 g.color = Color(255, 0, 0, 50)
                 g.stroke = BasicStroke(1f)
-                g.drawRect(comp.x, comp.y, comp.width, comp.height)
+                g.drawRect(comp.visualX, comp.visualY, comp.width, comp.height)
             }
         }
 
@@ -2217,8 +2249,10 @@ class UIManager(val game: KapeLuz) {
 
                 // 1. PRIORYTET: Sprawdź najpierw aktualnie zaznaczony komponent (aby nie złapać sąsiada)
                 selectedComponent?.let { comp ->
-                    val isNear = x >= comp.x - margin && x <= comp.x + comp.width + margin &&
-                                 y >= comp.y - margin && y <= comp.y + comp.height + margin
+                    val vx = comp.visualX
+                    val vy = comp.visualY
+                    val isNear = x >= vx - margin && x <= vx + comp.width + margin &&
+                                 y >= vy - margin && y <= vy + comp.height + margin
                     if (isNear) {
                         performComponentSelection(comp, x, y, margin)
                         return true
@@ -2229,8 +2263,10 @@ class UIManager(val game: KapeLuz) {
                 for (comp in panel.components.asReversed()) {
                     if (comp == selectedComponent) continue
 
-                    val isNear = x >= comp.x - margin && x <= comp.x + comp.width + margin &&
-                                 y >= comp.y - margin && y <= comp.y + comp.height + margin
+                    val vx = comp.visualX
+                    val vy = comp.visualY
+                    val isNear = x >= vx - margin && x <= vx + comp.width + margin &&
+                                 y >= vy - margin && y <= vy + comp.height + margin
 
                     if (isNear) {
                         performComponentSelection(comp, x, y, margin)
@@ -2240,15 +2276,7 @@ class UIManager(val game: KapeLuz) {
             }
             
             // Kliknięcie w puste miejsce - zdejmij fokus/edycję z poprzedniego komponentu
-            when (val old = selectedComponent) {
-                is UIButton -> old.isEditingText = false
-                is UIText -> old.isEditingText = false
-                is UITextField -> old.isFocused = false
-                is UIDropdown -> old.isExpanded = false
-                is UICheckbox -> old.isEditingText = false
-                is UIProgressBar -> old.isEditingText = false
-                is UISlider -> old.isEditingText = false
-            }
+            clearEditState(selectedComponent)
             selectedComponent = null
             activeDropdown = null
             inspectorPanel.isVisible = false
@@ -2266,15 +2294,7 @@ class UIManager(val game: KapeLuz) {
 
         // Jeśli zmieniamy zaznaczenie, wyłącz tryb edycji tekstu na starym komponencie
         if (selectedComponent != comp) {
-            when (val old = selectedComponent) {
-                is UIButton -> old.isEditingText = false
-                is UIText -> old.isEditingText = false
-                is UITextField -> old.isFocused = false
-                is UIDropdown -> old.isExpanded = false
-                is UICheckbox -> old.isEditingText = false
-                is UIProgressBar -> old.isEditingText = false
-                is UISlider -> old.isEditingText = false
-            }
+            clearEditState(selectedComponent)
         }
 
         // Przenieś komponent na sam wierzch warstwy (na koniec listy)
@@ -2288,14 +2308,14 @@ class UIManager(val game: KapeLuz) {
 
             when (comp) {
                 is UIButton -> {
-                    comp.isEditingText = true
-                    comp.cursorIndex = comp.text.length
-                    comp.selectionStartIndex = if (comp.text == "New Button") 0 else comp.cursorIndex
+                    comp.editor.isEditing = true
+                    comp.editor.cursorIndex = comp.text.length
+                    comp.editor.selectionStartIndex = if (comp.text == "New Button") 0 else comp.editor.cursorIndex
                 }
                 is UIText -> {
-                    comp.isEditingText = true
-                    comp.cursorIndex = comp.text.length
-                    comp.selectionStartIndex = if (comp.text == "New Text") 0 else comp.cursorIndex
+                    comp.editor.isEditing = true
+                    comp.editor.cursorIndex = comp.text.length
+                    comp.editor.selectionStartIndex = if (comp.text == "New Text") 0 else comp.editor.cursorIndex
                 }
                 is UITextField -> {
                     comp.isFocused = true
@@ -2307,16 +2327,16 @@ class UIManager(val game: KapeLuz) {
                     // Ekspansja listy jest obsługiwana przez pojedynczy klik w handleClick.
                 }
                 is UICheckbox -> {
-                    comp.isEditingText = true
-                    comp.cursorIndex = comp.text.length
+                    comp.editor.isEditing = true
+                    comp.editor.cursorIndex = comp.text.length
                 }
                 is UIProgressBar -> {
-                    comp.isEditingText = true
-                    comp.cursorIndex = comp.text.length
+                    comp.editor.isEditing = true
+                    comp.editor.cursorIndex = comp.text.length
                 }
                 is UISlider -> {
-                    comp.isEditingText = true
-                    comp.cursorIndex = comp.text.length
+                    comp.editor.isEditing = true
+                    comp.editor.cursorIndex = comp.text.length
                 }
             }
         } else {
@@ -2328,10 +2348,13 @@ class UIManager(val game: KapeLuz) {
         initialCompX = comp.x; initialCompY = comp.y
         initialCompW = comp.width; initialCompH = comp.height
 
-        isResizingLeft = kotlin.math.abs(x - comp.x) < margin
-        isResizingRight = kotlin.math.abs(x - (comp.x + comp.width)) < margin
-        isResizingTop = kotlin.math.abs(y - comp.y) < margin
-        isResizingBottom = kotlin.math.abs(y - (comp.y + comp.height)) < margin
+        val vx = comp.visualX
+        val vy = comp.visualY
+
+        isResizingLeft = kotlin.math.abs(x - vx) < margin
+        isResizingRight = kotlin.math.abs(x - (vx + comp.width)) < margin
+        isResizingTop = kotlin.math.abs(y - vy) < margin
+        isResizingBottom = kotlin.math.abs(y - (vy + comp.height)) < margin
 
         isDragging = !isResizingLeft && !isResizingRight && !isResizingTop && !isResizingBottom
     }

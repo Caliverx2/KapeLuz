@@ -792,10 +792,13 @@ class KapeLuz : JPanel() {
         hud.add(UIProgressBar( xpBarX, xpBarY, xpBarW, xpBarH,
             fillColor = Color(0x3cf03c), // Kolor XP (jasnozielony)
             mode = ProgressBarMode.STEP_10,
-            fontSize = 14f,
             progressProvider = {
                 playerXP.toFloat() / getXPNeededForNextLevel(playerLevel).toFloat()
-            },
+            }
+        ))
+        hud.add(UIText(
+            xpBarX + xpBarW/2 - 12, xpBarY-24, "",
+            fontSize = 24f, color = Color.WHITE,
             textProvider = { if (playerLevel > 0) "$playerLevel" else "" }
         ))
     }

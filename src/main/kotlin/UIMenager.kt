@@ -273,7 +273,8 @@ class UIText(
     var fontSize: Float,
     var color: Color,
     var centered: Boolean = false,
-    tooltip: String? = null
+    tooltip: String? = null,
+    var textProvider: (() -> String)? = null
 ) : UIComponent() {
     // Flaga informująca, że wymiary wymagają przeliczenia (np. po zmianie tekstu)
     private var needsSizeUpdate = true
@@ -316,6 +317,12 @@ class UIText(
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
         if (!isVisible) return
+
+        // Pobieramy aktualny tekst z dostawcy danych (jeśli istnieje)
+        textProvider?.invoke()?.let {
+            if (it != text) text = it // Setter 'text' automatycznie ustawi needsSizeUpdate
+        }
+
         g.font = game.fpsFont.deriveFont(fontSize)
 
         val fm = g.fontMetrics

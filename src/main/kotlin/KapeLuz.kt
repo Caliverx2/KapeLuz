@@ -275,9 +275,18 @@ class KapeLuz : JPanel() {
     var lastCamSecX = Int.MIN_VALUE
     var lastCamSecY = Int.MIN_VALUE
     var lastCamSecZ = Int.MIN_VALUE
-    var lastYaw = Double.MAX_VALUE
-    var lastPitch = Double.MAX_VALUE
     var visibilityGraphDirty = true
+
+    // --- Optymalizacja BFS: Cache dla danych okluzji i meshy ---
+    // Cache dla masek okluzji segmentów w promieniu renderDistance
+    private var cachedBfsOcclusion: Array<Array<ByteArray?>>? = null
+    private var cachedBfsOcclusionMinCx: Int = 0
+    private var cachedBfsOcclusionMinCz: Int = 0
+
+    // Cache dla meshy segmentów w promieniu renderDistance
+    private var cachedBfsMeshes: Array<Array<Array<MutableList<Triangle3d>>?>?>? = null
+    private var cachedBfsMeshesMinCx: Int = 0
+    private var cachedBfsMeshesMinCz: Int = 0
 
     // FPS Counter
     var lastFpsTime = System.currentTimeMillis()
@@ -621,7 +630,7 @@ class KapeLuz : JPanel() {
 
         // Ładujemy mody raz przy starcie aplikacji
         modLoader.loadMods()
-        
+
         // Ładowanie ustawień z options.txt
         loadOptions()
         saveOptions()
@@ -870,6 +879,12 @@ class KapeLuz : JPanel() {
         options.add(UIText(400, 415, "Field of View (FOV):", 14f, Color.LIGHT_GRAY))
         options.add(UISlider(400, 435, 380, 40, 30f, 110f, fov.toFloat(), "FOV") { newValue ->
             fov = newValue.toDouble()
+            saveOptions()
+        })
+
+        options.add(UIText(400, 415+50, "Render Distance:", 14f, Color.LIGHT_GRAY))
+        options.add(UISlider(400, 435+50, 380, 40, 1f, 30f, renderDistance.toFloat(), "DISTANCE") { newValue ->
+            renderDistance = newValue.toInt()
             saveOptions()
         })
 
@@ -1126,7 +1141,7 @@ class KapeLuz : JPanel() {
             file.readLines().forEach { line ->
                 val cleanLine = line.trim()
                 if (cleanLine.isEmpty() || !cleanLine.contains("=")) return@forEach
-                
+
                 val key = cleanLine.substringBefore("=").trim()
                 val value = cleanLine.substringAfter("=").substringBefore(";").trim()
 
@@ -1153,7 +1168,7 @@ class KapeLuz : JPanel() {
         val file = File(gameDir, "options.txt")
         try {
             val sb = StringBuilder()
-            
+
             // Helper do budowania linii w formacie Klucz = Wartość;
             fun appendOption(key: String, value: Any) {
                 sb.append("$key = $value;\n")
@@ -2116,7 +2131,7 @@ class KapeLuz : JPanel() {
         chunksToUpdate.forEach { p -> chunks[p]?.let { Arrays.fill(it.light, 0.toByte()) } }
 
         repeat(3) {
-            chunksToUpdate.forEach { p -> chunks[p]?.let { calculateLighting(it) } }
+            chunksToUpdate.forEach { p -> chunks[p]?.let { calculateLighting(it) } } // Powtarzamy tylko raz, jeśli BFS jest poprawny
         }
 
         chunksToUpdate.forEach { p -> updateChunkMesh(p.x, p.y) }
@@ -2204,6 +2219,25 @@ class KapeLuz : JPanel() {
         var qHead = 0
         var qTail = 0
 
+        // --- LOKALNY CACHE SĄSIEDNICH CHUNKÓW DLA SZYBSZEGO DOSTĘPU ---
+        val neighborChunks = arrayOfNulls<Chunk>(9) // 3x3 grid of chunks
+        // Indeksy:
+        // 0 1 2
+        // 3 4 5  (4 to bieżący chunk)
+        // 6 7 8
+        neighborChunks[4] = chunk // Bieżący chunk
+        neighborChunks[0] = chunks[Point(chunk.x - 1, chunk.z - 1)]
+        neighborChunks[1] = chunks[Point(chunk.x, chunk.z - 1)]
+        neighborChunks[2] = chunks[Point(chunk.x + 1, chunk.z - 1)]
+        neighborChunks[3] = chunks[Point(chunk.x - 1, chunk.z)]
+        neighborChunks[5] = chunks[Point(chunk.x + 1, chunk.z)]
+        neighborChunks[6] = chunks[Point(chunk.x - 1, chunk.z + 1)]
+        neighborChunks[7] = chunks[Point(chunk.x, chunk.z + 1)]
+        neighborChunks[8] = chunks[Point(chunk.x + 1, chunk.z + 1)]
+
+        val currentChunkX = chunk.x
+        val currentChunkZ = chunk.z
+
         // 1. Inicjalizacja światła słonecznego (z góry)
         for (x in 0 until 16) {
             for (z in 0 until 16) {
@@ -2236,6 +2270,32 @@ class KapeLuz : JPanel() {
             }
         }
 
+        // Lokalna funkcja do pobierania bloku z cache'u sąsiadów
+        fun getBlockFromNeighbors(wx: Int, wy: Int, wz: Int): Int {
+            val targetCx = if (wx >= 0) wx / 16 else (wx + 1) / 16 - 1
+            val targetCz = if (wz >= 0) wz / 16 else (wz + 1) / 16 - 1
+
+            val dx = targetCx - currentChunkX
+            val dz = targetCz - currentChunkZ
+
+            val neighborIndex = (dz + 1) * 3 + (dx + 1) // Mapowanie dx,dz na indeks 0-8
+
+            if (neighborIndex in 0..8) {
+                val targetChunk = neighborChunks[neighborIndex]
+                if (targetChunk != null) {
+                    var lx = wx % 16; if (lx < 0) lx += 16
+                    var lz = wz % 16; if (lz < 0) lz += 16
+                    if (wy in 0..127) {
+                        return targetChunk.getBlock(lx, wy, lz)
+                    }
+                }
+            }
+            return 0 // Powietrze poza załadowanymi chunkami
+        }
+
+        // Lokalna funkcja do sprawdzania okluzji dla culling'u
+        fun isOpaqueForCullingLocal(blockId: Int): Boolean = isOpaqueForCulling(blockId)
+
         // 2. Import światła z sąsiadów (Propagacja przez granice chunków - powietrze oświetla powietrze)
         fun importLight(nx: Int, ny: Int, nz: Int, idx: Int, neighbor: Chunk) {
             val nVal = neighbor.getLight(nx, ny, nz)
@@ -2249,7 +2309,7 @@ class KapeLuz : JPanel() {
             var changed = false
 
             val blockId = chunk.blocks[idx]
-            // Światło może wejść do każdego nie-nieprzezroczystego bloku
+            // Światło może wejść do każdego nie-nieprzezroczystego bloku (używamy globalnej funkcji, bo to tylko raz na blok)
             if (!isOpaqueForCulling(blockId)) {
                 val absorption = 1 // Różne bloki mogą mieć różną absorpcję
                 if (nSky > mySky + absorption) {
@@ -2269,19 +2329,19 @@ class KapeLuz : JPanel() {
         }
 
         // West (x-1) -> Nasze x=0 czyta z x=15 sąsiada
-        chunks[Point(chunk.x - 1, chunk.z)]?.let { neighbor ->
+        neighborChunks[3]?.let { neighbor -> // Indeks 3 to chunk (x-1, z)
             for (z in 0 until 16) for (y in 0 until 128) importLight(15, y, z, chunk.getIndex(0, y, z), neighbor)
         }
         // East (x+1) -> Nasze x=15 czyta z x=0 sąsiada
-        chunks[Point(chunk.x + 1, chunk.z)]?.let { neighbor ->
+        neighborChunks[5]?.let { neighbor -> // Indeks 5 to chunk (x+1, z)
             for (z in 0 until 16) for (y in 0 until 128) importLight(0, y, z, chunk.getIndex(15, y, z), neighbor)
         }
         // North (z-1) -> Nasze z=0 czyta z z=15 sąsiada
-        chunks[Point(chunk.x, chunk.z - 1)]?.let { neighbor ->
+        neighborChunks[1]?.let { neighbor -> // Indeks 1 to chunk (x, z-1)
             for (x in 0 until 16) for (y in 0 until 128) importLight(x, y, 15, chunk.getIndex(x, y, 0), neighbor)
         }
         // South (z+1) -> Nasze z=15 czyta z z=0 sąsiada
-        chunks[Point(chunk.x, chunk.z + 1)]?.let { neighbor ->
+        neighborChunks[7]?.let { neighbor -> // Indeks 7 to chunk (x, z+1)
             for (x in 0 until 16) for (y in 0 until 128) importLight(x, y, 0, chunk.getIndex(x, y, 15), neighbor)
         }
 
@@ -2308,7 +2368,7 @@ class KapeLuz : JPanel() {
                 if (nx in 0..15 && ny in 0..127 && nz in 0..15) {
                     val nIdx = chunk.getIndex(nx, ny, nz)
                     val nBlockId = chunk.blocks[nIdx]
-                    // Światło może propagować do każdego nie-nieprzezroczystego bloku
+                    // Światło może propagować do każdego nie-nieprzezroczystego bloku (używamy globalnej funkcji)
                     if (!isOpaqueForCulling(nBlockId)) {
                         val absorption = 1 // Różne bloki mogą mieć różną absorpcję
                         val nVal = newLight[nIdx].toInt() and 0xFF
@@ -4325,11 +4385,48 @@ class KapeLuz : JPanel() {
     val sectionSafeRadius = sectionRadius * 2.5 // Zwiększono margines, aby naprawić "wygryzanie" krawędzi
 
     private fun isSegmentVisible(secX: Int, secY: Int, secZ: Int): Boolean {
+        // Używamy cache, aby uniknąć ciągłego przeliczania
+        if (cachedBfsOcclusion == null || cachedBfsMeshes == null) {
+            return false // Cache nie zainicjalizowany, segment niewidoczny
+        }
         val cx = if (secX >= 0) secX / 4 else (secX + 1) / 4 - 1
         val cz = if (secZ >= 0) secZ / 4 else (secZ + 1) / 4 - 1
         var localSecX = secX % 4; if (localSecX < 0) localSecX += 4
         var localSecZ = secZ % 4; if (localSecZ < 0) localSecZ += 4
         return isSectionVisible(cx, localSecX, secY, localSecZ, cz)
+    }
+
+    // Nowa funkcja do inicjalizacji cache BFS
+    private fun initializeBfsCache(camSecX: Int, camSecZ: Int) {
+        val maxChunkRadius = (renderDistance * 4 / 16) + 1 // Promień chunków do załadowania do cache
+        val minCx = camSecX / 4 - maxChunkRadius
+        val maxCx = camSecX / 4 + maxChunkRadius
+        val minCz = camSecZ / 4 - maxChunkRadius
+        val maxCz = camSecZ / 4 + maxChunkRadius
+
+        val chunkWidth = maxCx - minCx + 1
+        val chunkDepth = maxCz - minCz + 1
+
+        cachedBfsOcclusion = Array(chunkWidth) { arrayOfNulls<ByteArray>(chunkDepth) }
+        cachedBfsMeshes = Array(chunkWidth) { arrayOfNulls<Array<MutableList<Triangle3d>>>(chunkDepth) } // 32 sekcje Y
+
+        cachedBfsOcclusionMinCx = minCx
+        cachedBfsOcclusionMinCz = minCz
+        cachedBfsMeshesMinCx = minCx
+        cachedBfsMeshesMinCz = minCz
+
+        for (cx in minCx..maxCx) {
+            for (cz in minCz..maxCz) {
+                val chunkPoint = Point(cx, cz)
+                val chunk = chunks[chunkPoint]
+                if (chunk != null) {
+                    val cacheX = cx - minCx
+                    val cacheZ = cz - minCz
+                    cachedBfsOcclusion!![cacheX][cacheZ] = chunkOcclusion[chunkPoint]
+                    cachedBfsMeshes!![cacheX]?.set(cacheZ, chunkMeshes[chunkPoint])
+                }
+            }
+        }
     }
 
     private fun rebuildVisibilityGraph(startSecX: Int, startSecY: Int, startSecZ: Int) {
@@ -4340,6 +4437,10 @@ class KapeLuz : JPanel() {
         val diameter = maxRadius * 2 + 1
         // Zwiększamy zakres pionowy dla BFS, aby obsłużyć latanie pod/nad światem (próżnia)
         // 256 segmentów (1024 bloki) z offsetem 128 pozwala na swobodne latanie +/- 512 bloków od zera
+
+        // Inicjalizujemy cache przed rozpoczęciem BFS
+        initializeBfsCache(startSecX, startSecZ)
+
         val bfsHeight = 256
         val bfsYOffset = 128
 
@@ -4502,16 +4603,11 @@ class KapeLuz : JPanel() {
         val camSecZ = floor(camZ / segmentSize).toInt()
 
         // Aktualizacja grafu widoczności tylko gdy zmienimy segment lub świat się zmieni
-        if (visibilityGraphDirty || camSecX != lastCamSecX || camSecY != lastCamSecY || camSecZ != lastCamSecZ ||
-            abs(yaw - lastYaw) > 0.001 || abs(pitch - lastPitch) > 0.001) {
+        if (visibilityGraphDirty || camSecX != lastCamSecX || camSecY != lastCamSecY || camSecZ != lastCamSecZ) {
             // Fix: Clamp Y to 0..15 to ensure BFS starts within valid world bounds even if player is outside
             // FIX: Nie ograniczamy Y, aby pozwolić na poprawne obliczanie widoczności z dołu/góry świata (próżnia)
             rebuildVisibilityGraph(camSecX, camSecY, camSecZ)
             lastCamSecX = camSecX
-            lastCamSecY = camSecY
-            lastCamSecZ = camSecZ
-            lastYaw = yaw
-            lastPitch = pitch
             visibilityGraphDirty = false
         }
         // Iterujemy po wcześniej obliczonych widocznych segmentach
@@ -5239,30 +5335,52 @@ class KapeLuz : JPanel() {
 
     // Pobiera maskę okluzji (Byte)
     private fun getSegmentOcclusionMask(secX: Int, secY: Int, secZ: Int): Byte {
-        if (secY < 0 || secY > 31) return 0
-        // Konwersja globalnych segmentów na Chunk + Local Segment
+        if (secY < 0 || secY > 31) return 0 // Poza zakresem Y
+
         val cx = if (secX >= 0) secX / 4 else (secX + 1) / 4 - 1
         val cz = if (secZ >= 0) secZ / 4 else (secZ + 1) / 4 - 1
 
-        val occlusionData = chunkOcclusion[Point(cx, cz)] ?: return 0
+        val cacheX = cx - cachedBfsOcclusionMinCx
+        val cacheZ = cz - cachedBfsOcclusionMinCz
 
-        var localSecX = secX % 4; if (localSecX < 0) localSecX += 4
-        var localSecZ = secZ % 4; if (localSecZ < 0) localSecZ += 4
-        val index = secY * 16 + localSecZ * 4 + localSecX
-        return occlusionData[index]
+        if (cacheX >= 0 && cacheX < cachedBfsOcclusion!!.size &&
+            cacheZ >= 0 && cacheZ < cachedBfsOcclusion!![0].size) {
+            val occlusionData = cachedBfsOcclusion!![cacheX][cacheZ]
+            if (occlusionData != null) {
+                var localSecX = secX % 4; if (localSecX < 0) localSecX += 4
+                var localSecZ = secZ % 4; if (localSecZ < 0) localSecZ += 4
+                val index = secY * 16 + localSecZ * 4 + localSecX
+                if (index in occlusionData.indices) {
+                    return occlusionData[index]
+                }
+            }
+        }
+        return 0 // Domyślnie brak okluzji (przezroczyste)
     }
 
     private fun isSegmentEmptyBySec(secX: Int, secY: Int, secZ: Int): Boolean {
-        if (secY < 0 || secY > 31) return true
+        if (secY < 0 || secY > 31) return true // Poza zakresem Y
+
         val cx = if (secX >= 0) secX / 4 else (secX + 1) / 4 - 1
         val cz = if (secZ >= 0) secZ / 4 else (secZ + 1) / 4 - 1
 
-        val mesh = chunkMeshes[Point(cx, cz)] ?: return true
+        val cacheX = cx - cachedBfsMeshesMinCx
+        val cacheZ = cz - cachedBfsMeshesMinCz
 
-        var localSecX = secX % 4; if (localSecX < 0) localSecX += 4
-        var localSecZ = secZ % 4; if (localSecZ < 0) localSecZ += 4
-        val index = secY * 16 + localSecZ * 4 + localSecX
-        return mesh[index].isEmpty()
+        if (cacheX >= 0 && cacheX < cachedBfsMeshes!!.size &&
+            cacheZ >= 0 && cacheZ < cachedBfsMeshes!![0]!!.size
+        ) {
+            val chunkMeshArray = cachedBfsMeshes!![cacheX]?.get(cacheZ)
+            if (chunkMeshArray != null) {
+                var localSecX = secX % 4; if (localSecX < 0) localSecX += 4
+                var localSecZ = secZ % 4; if (localSecZ < 0) localSecZ += 4
+                val index = secY * 16 + localSecZ * 4 + localSecX
+                if (index in chunkMeshArray.indices) {
+                    return chunkMeshArray[index]?.isEmpty() ?: true
+                }
+            }
+        }
+        return true // Domyślnie pusty (brak mesha)
     }
 
     private fun isSectionVisible(cx: Int, secX: Int, secY: Int, secZ: Int, cz: Int): Boolean {

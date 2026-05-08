@@ -878,7 +878,7 @@ class KapeLuz : JPanel() {
 
         options.add(UIText(400, 415, "Field of View (FOV):", 14f, Color.LIGHT_GRAY))
         options.add(UISlider(400, 435, 380, 40, 30f, 110f, fov.toFloat(), "FOV") { newValue ->
-            fov = newValue.toDouble()
+            fov = (newValue.toInt()).toDouble()
             saveOptions()
         })
 
@@ -2986,6 +2986,67 @@ class KapeLuz : JPanel() {
         val sections = Array(512) { mutableListOf<Triangle3d>() }
         val blockCounts = IntArray(512) // Licznik bloków w każdym segmencie
 
+        // --- LOKALNY CACHE SĄSIEDNICH CHUNKÓW DLA SZYBSZEGO DOSTĘPU ---
+        val neighborChunks = arrayOfNulls<Chunk>(9) // 3x3 grid of chunks
+        neighborChunks[4] = chunk // Bieżący chunk
+        neighborChunks[0] = chunks[Point(chunk.x - 1, chunk.z - 1)]
+        neighborChunks[1] = chunks[Point(chunk.x, chunk.z - 1)]
+        neighborChunks[2] = chunks[Point(chunk.x + 1, chunk.z - 1)]
+        neighborChunks[3] = chunks[Point(chunk.x - 1, chunk.z)]
+        neighborChunks[5] = chunks[Point(chunk.x + 1, chunk.z)]
+        neighborChunks[6] = chunks[Point(chunk.x - 1, chunk.z + 1)]
+        neighborChunks[7] = chunks[Point(chunk.x, chunk.z + 1)]
+        neighborChunks[8] = chunks[Point(chunk.x + 1, chunk.z + 1)]
+
+        // currentChunkX i currentChunkZ są już dostępne z parametru 'chunk'
+        // chunk.x i chunk.z
+
+        // --- LOKALNA FUNKCJA getRawBlock Z UŻYCIEM CACHE ---
+        fun getRawBlockLocal(wx: Int, wy: Int, wz: Int): Int {
+            val targetCx = if (wx >= 0) wx / 16 else (wx + 1) / 16 - 1
+            val targetCz = if (wz >= 0) wz / 16 else (wz + 1) / 16 - 1
+
+            val dx = targetCx - chunk.x
+            val dz = targetCz - chunk.z
+
+            val neighborIndex = (dz + 1) * 3 + (dx + 1) // Mapowanie dx,dz na indeks 0-8
+
+            if (neighborIndex in 0..8) {
+                val targetChunk = neighborChunks[neighborIndex]
+                if (targetChunk != null) {
+                    var lx = wx % 16; if (lx < 0) lx += 16
+                    var lz = wz % 16; if (lz < 0) lz += 16
+                    if (wy in 0..127) {
+                        return targetChunk.getBlock(lx, wy, lz)
+                    }
+                }
+            }
+            return 0 // Powietrze poza załadowanymi chunkami
+        }
+
+        // --- LOKALNA FUNKCJA getFluidLevel Z UŻYCIEM CACHE ---
+        fun getFluidLevelLocal(wx: Int, wy: Int, wz: Int): Int {
+            val targetCx = if (wx >= 0) wx / 16 else (wx + 1) / 16 - 1
+            val targetCz = if (wz >= 0) wz / 16 else (wz + 1) / 16 - 1
+
+            val dx = targetCx - chunk.x
+            val dz = targetCz - chunk.z
+
+            val neighborIndex = (dz + 1) * 3 + (dx + 1)
+
+            if (neighborIndex in 0..8) {
+                val targetChunk = neighborChunks[neighborIndex]
+                if (targetChunk != null) {
+                    var lx = wx % 16; if (lx < 0) lx += 16
+                    var lz = wz % 16; if (lz < 0) lz += 16
+                    if (wy in 0..127) {
+                        return targetChunk.getMeta(lx, wy, lz) and 0xF
+                    }
+                }
+            }
+            return 0
+        }
+
         for (lx in 0 until 16) {
             for (lz in 0 until 16) {
                 for (y in 0 until 128) { // Zmieniono zakres wysokości dla generowania mesha
@@ -3064,7 +3125,7 @@ class KapeLuz : JPanel() {
 
                     // Helper do obliczania wysokości cieczy sąsiada (dla dolnej krawędzi ścianki)
                     fun getNeighborHeight(nx: Int, ny: Int, nz: Int): Double {
-                        val nId = getRawBlock(nx, ny, nz)
+                        val nId = getRawBlockLocal(nx, ny, nz)
                         if (nId != rawBlock) return 0.0 // Jeśli to powietrze lub inny blok, rysujemy od dołu (0.0)
 
                         val nLevel = getFluidLevel(nx, ny, nz)
@@ -3075,7 +3136,7 @@ class KapeLuz : JPanel() {
 
                     // Helper do decydowania czy rysować GÓRĘ/DÓŁ (standardowa logika)
                     fun shouldRenderCap(nx: Int, ny: Int, nz: Int, isTop: Boolean): Boolean {
-                        val neighborId = getRawBlock(nx, ny, nz)
+                        val neighborId = getRawBlockLocal(nx, ny, nz)
                         if (isFluid) { // Current block is a fluid
                             // Jeśli sąsiad (góra lub dół) to ten sam płyn, nie rysujemy ścianki.
                             if (neighborId == rawBlock) return false
@@ -3104,15 +3165,15 @@ class KapeLuz : JPanel() {
                     // Logika wyłączania AO:
                     // 1. Dla płynów: Wyłączamy AO całkowicie.
                     // 2. Dla bloków stałych: Wyłączamy AO jeśli sąsiadują z płynem (żeby uniknąć ciemnych rogów przy wodzie).
-                    fun shouldDisableAO(nx: Int, ny: Int, nz: Int) = isFluid || fluidBlocks.contains(getRawBlock(nx, ny, nz))
+                    fun shouldDisableAO(nx: Int, ny: Int, nz: Int) = isFluid || fluidBlocks.contains(getRawBlockLocal(nx, ny, nz)) // Używamy lokalnego cache
 
                     // Sprawdzamy sąsiadów
-                    if (shouldRenderSide(wx, y, wz - 1)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 0, color, isFluid, height, getNeighborHeight(wx, y, wz - 1), shouldDisableAO(wx, y, wz - 1))
-                    if (shouldRenderSide(wx, y, wz + 1)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 1, color, isFluid, height, getNeighborHeight(wx, y, wz + 1), shouldDisableAO(wx, y, wz + 1))
-                    if (shouldRenderSide(wx - 1, y, wz)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 2, color, isFluid, height, getNeighborHeight(wx - 1, y, wz), shouldDisableAO(wx - 1, y, wz))
-                    if (shouldRenderSide(wx + 1, y, wz)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 3, color, isFluid, height, getNeighborHeight(wx + 1, y, wz), shouldDisableAO(wx + 1, y, wz))
-                    if (shouldRenderCap(wx, y + 1, wz, true)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 4, color, isFluid, height, 0.0, shouldDisableAO(wx, y + 1, wz))
-                    if (shouldRenderCap(wx, y - 1, wz, false)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 5, color, false, height, 0.0, shouldDisableAO(wx, y - 1, wz))
+                    if (shouldRenderSide(wx, y, wz - 1)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 0, color, isFluid, height, getNeighborHeight(wx, y, wz - 1), shouldDisableAO(wx, y, wz - 1)) // Z-
+                    if (shouldRenderSide(wx, y, wz + 1)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 1, color, isFluid, height, getNeighborHeight(wx, y, wz + 1), shouldDisableAO(wx, y, wz + 1)) // Z+
+                    if (shouldRenderSide(wx - 1, y, wz)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 2, color, isFluid, height, getNeighborHeight(wx - 1, y, wz), shouldDisableAO(wx - 1, y, wz)) // X-
+                    if (shouldRenderSide(wx + 1, y, wz)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 3, color, isFluid, height, getNeighborHeight(wx + 1, y, wz), shouldDisableAO(wx + 1, y, wz)) // X+
+                    if (shouldRenderCap(wx, y + 1, wz, true)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 4, color, isFluid, height, 0.0, shouldDisableAO(wx, y + 1, wz)) // Y+
+                    if (shouldRenderCap(wx, y - 1, wz, false)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 5, color, false, height, 0.0, shouldDisableAO(wx, y - 1, wz)) // Y-
                 }
             }
         }

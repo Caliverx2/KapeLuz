@@ -1190,6 +1190,7 @@ class UISlider(
         get() = editor.text
         set(v) { editor.text = v }
 
+    private var isDragging = false
     private var savedText = ""
     private var initialVal = 0f
     private var initialFontSize = 20f
@@ -1211,6 +1212,7 @@ class UISlider(
         editor.reset(savedText)
         currentVal = initialVal
         fontSize = initialFontSize
+        isDragging = false
     }
 
     override fun render(g: Graphics2D, game: KapeLuz, mouseX: Int, mouseY: Int) {
@@ -1258,23 +1260,26 @@ class UISlider(
     }
 
     override fun onClick(clickX: Int, clickY: Int): Boolean {
-        if (isMouseOver(clickX, clickY) && isEnabled) {
-            updateValueFromMouse(clickX)
-            return true
-        }
-        return false
+        return isMouseOver(clickX, clickY) && isEnabled
     }
 
     override fun onPress(x: Int, y: Int): Boolean {
         if (isMouseOver(x, y) && isEnabled) {
+            isDragging = true
             updateValueFromMouse(x)
             return true
         }
         return false
     }
 
+    override fun onRelease(x: Int, y: Int) {
+        isDragging = false
+    }
+
     override fun onDrag(x: Int, y: Int) {
-        if (isEnabled) updateValueFromMouse(x)
+        if (isDragging && isEnabled) {
+            updateValueFromMouse(x)
+        }
     }
 
     override fun onKey(e: KeyEvent): Boolean = editor.handleKey(e)

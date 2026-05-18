@@ -31,7 +31,7 @@ import dev.onvoid.webrtc.RTCIceCandidate
 import java.io.File
 import java.nio.ByteBuffer
 
-data class Vector3d(var x: Double, var y: Double, var z: Double, var ao: Double = 1.0)
+data class Vector3d(var x: Double, var y: Double, var z: Double, var ao: Double = 1.0, var u: Float = 0f, var v: Float = 0f)
 data class BlockPos(val x: Int, val y: Int, val z: Int)
 data class RayHit(val blockPos: BlockPos, val faceIndex: Int)
 data class Triangle3d(
@@ -122,6 +122,11 @@ fun Double.toSmartString(): String {
 // To pozwala modom przejąć kontrolę nad tym, jak światło wpływa na kolor piksela.
 interface LightProcessor {
     fun process(x: Int, y: Int, z: Int, baseColor: Color, skyLevel: Int, blockLevel: Int, sunIntensity: Double, minLight: Double): Int
+}
+
+// --- INTERFEJS RENDEROWANIA GRACZA ---
+interface PlayerRenderer {
+    fun render(game: KapeLuz, player: RemotePlayer)
 }
 
 class KapeLuz : JPanel() {
@@ -248,6 +253,176 @@ class KapeLuz : JPanel() {
             return (r shl 16) or (g shl 8) or b
         }
     }
+
+    // Domyślny renderer gracza (obecna logika)
+    var playerRenderer: PlayerRenderer = object : PlayerRenderer {
+        private var skinTexture: BufferedImage? = null
+        private var textureLoaded = false
+
+        private fun loadTexture() {
+            if (textureLoaded) return
+            try {
+                val stream = javaClass.getResourceAsStream("/textures/default.png")
+                if (stream != null) {
+                    skinTexture = ImageIO.read(stream)
+                    println("Skin texture loaded successfully.")
+                } else {
+                    println("Skin texture not found at /textures/default.png")
+                }
+            } catch (e: Exception) {
+                println("Failed to load skin texture: ${e.message}")
+            }
+            textureLoaded = true
+        }
+
+        override fun render(game: KapeLuz, player: RemotePlayer) {
+            loadTexture()
+            val tex = skinTexture
+            if (tex == null) {
+                game.renderPlayerModelInternal(player) // Fallback do kolorów
+                return
+            }
+            renderTexturedPlayer(game, player, tex)
+        }
+
+        private fun renderTexturedPlayer(game: KapeLuz, player: RemotePlayer, tex: BufferedImage) {
+            val s = game.cubeSize / 16.0
+            val px = player.x; val py = player.y - 24 * s; val pz = player.z
+            val bYaw = -player.bodyYaw; val hYaw = -player.yaw; val hPitch = -player.pitch
+
+            // Pobranie światła (identycznie jak w renderPlayerModelInternal)
+            val lightX = floor(player.x / game.cubeSize).toInt()
+            val headLightY = floor((player.y + 10.0) / game.cubeSize).toInt()
+            val feetLightY = floor((player.y - 3.0 + 10.0) / game.cubeSize).toInt()
+            val lightZ = floor(player.z / game.cubeSize).toInt()
+            val headLightVal = game.getLight(lightX, headLightY, lightZ)
+            val feetLightVal = game.getLight(lightX, feetLightY, lightZ)
+            val headSky = (headLightVal shr 4) and 0xF; val headBlock = headLightVal and 0xF
+            val feetSky = (feetLightVal shr 4) and 0xF; val feetBlock = feetLightVal and 0xF
+            val finalLightVal = (maxOf(headSky, feetSky) shl 4) or maxOf(headBlock, feetBlock)
+
+            val modelCenterX = 6.0 * s
+            val modelCenterZ = 6.0 * s
+            val modelFeetOffset = 6.5 * s
+
+            // GŁOWA (8x8x8) - Texture (0,0) - Pivot ustawiony na styk z tułowiem
+            val headCy = (21.5 * s) + modelFeetOffset
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ, 
+                8.0 * s, 8.0 * s, 8.0 * s, 0, 0, 8, 8, 8, hYaw, finalLightVal, tex, px, py, pz, hPitch, headCy - 4.0 * s)
+            // GŁOWA (DRUGA WARSTWA - Hat)
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ, 
+                8.8 * s, 8.8 * s, 8.8 * s, 32, 0, 8, 8, 8, hYaw, finalLightVal, tex, px, py, pz, hPitch, headCy - 4.0 * s)
+            
+            // TUŁÓW (8x12x4) - Texture (16,16)
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                8.0 * s, 12.0 * s, 4.0 * s, 16, 16, 8, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+            // TUŁÓW (DRUGA WARSTWA - Jacket)
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                8.8 * s, 13.2 * s, 4.4 * s, 16, 32, 8, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+
+            // PRAWA RĘKA (4x12x4) - Texture (40,16)
+            drawTexturedPart(game, (12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.0 * s, 12.0 * s, 4.0 * s, 40, 16, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+            // PRAWA RĘKA (DRUGA WARSTWA - Sleeve)
+            drawTexturedPart(game, (12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.4 * s, 13.2 * s, 4.4 * s, 40, 32, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+
+            // LEWA RĘKA (4x12x4) - Texture pos (32,48)
+            drawTexturedPart(game, (0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.0 * s, 12.0 * s, 4.0 * s, 32, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+            // LEWA RĘKA (DRUGA WARSTWA - Sleeve)
+            drawTexturedPart(game, (0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.4 * s, 13.2 * s, 4.4 * s, 48, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+
+            // PRAWA NOGA (4x12x4) - Texture (0,16)
+            drawTexturedPart(game, (8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.0 * s, 12.0 * s, 4.0 * s, 0, 16, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+            // PRAWA NOGA (DRUGA WARSTWA - Pants)
+            drawTexturedPart(game, (8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.4 * s, 13.2 * s, 4.4 * s, 0, 32, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+
+            // LEWA NOGA (4x12x4) - Texture (16,48)
+            drawTexturedPart(game, (4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.0 * s, 12.0 * s, 4.0 * s, 16, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+            // LEWA NOGA (DRUGA WARSTWA - Pants)
+            drawTexturedPart(game, (4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+                4.4 * s, 13.2 * s, 4.4 * s, 0, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
+        }
+
+        private fun drawTexturedPart(
+            game: KapeLuz, cx: Double, cy: Double, cz: Double, sx: Double, sy: Double, sz: Double,
+            tx: Int, ty: Int, tw: Int, th: Int, td: Int, 
+            partYaw: Double, lightVal: Int, tex: BufferedImage, px: Double, py: Double, pz: Double,
+            partPitch: Double = 0.0, pivotY: Double = cy
+        ) {
+            val dx = sx / 2.0; val dy = sy / 2.0; val dz = sz / 2.0
+            
+            // Definicja 8 wierzchołków sześcianu
+            val corners = arrayOf(
+                Vector3d(cx - dx, cy - dy, cz - dz), // 0: Bottom-Left-Front (BLF)
+                Vector3d(cx + dx, cy - dy, cz - dz), // 1: Bottom-Right-Front (BRF)
+                Vector3d(cx + dx, cy + dy, cz - dz), // 2: Top-Right-Front (TRF)
+                Vector3d(cx - dx, cy + dy, cz - dz), // 3: Top-Left-Front (TLF)
+                Vector3d(cx - dx, cy - dy, cz + dz), // 4: Bottom-Left-Back (BLB)
+                Vector3d(cx + dx, cy - dy, cz + dz), // 5: Bottom-Right-Back (BRB)
+                Vector3d(cx + dx, cy + dy, cz + dz), // 6: Top-Right-Back (TRB)
+                Vector3d(cx - dx, cy + dy, cz + dz)  // 7: Top-Left-Back (TLB)
+            )
+
+            for (v in corners) {
+                if (partPitch != 0.0) {
+                    val vly = v.y - pivotY; val vlz = v.z
+                    val cosP = cos(partPitch); val sinP = sin(partPitch)
+                    v.y = (vly * cosP - vlz * sinP) + pivotY // Rotate Y around pivot
+                    v.z = vlz * cosP + vly * sinP // Rotate Z around pivot
+                }
+                val cosY = cos(partYaw); val sinY = sin(partYaw)
+                val nx = v.x * cosY - v.z * sinY
+                val nz = v.z * cosY + v.x * sinY
+                v.x = nx + px; v.y = v.y + py; v.z = nz + pz // Translate to world position
+            }
+
+            // Precyzyjne mapowanie ścian (zgodne z formatem Minecraft Skin 64x64)
+            // Każda ściana to: Indeksy quad (TL, TR, BR, BL) -> U, V, Width, Height
+            val faceData = arrayOf(
+                // Front (Z+)
+                FaceMapping(intArrayOf(7, 6, 5, 4), tx + td, ty + td, tw, th),
+                // Back (Z-)
+                FaceMapping(intArrayOf(2, 3, 0, 1), tx + td + tw + td, ty + td, tw, th),
+                // Top (Y+)
+                FaceMapping(intArrayOf(3, 2, 6, 7), tx + td, ty, tw, td),
+                // Bottom (Y-) - Przywrócone indeksy (żeby nie znikała) + włączone odwrócenie UV (flipX = true)
+                FaceMapping(intArrayOf(1, 0, 4, 5), tx + td + tw, ty, tw, td, flipX = true),
+                // Right (X+)
+                FaceMapping(intArrayOf(6, 2, 1, 5), tx, ty + td, td, th),
+                // Left (X-)
+                FaceMapping(intArrayOf(3, 7, 4, 0), tx + td + tw, ty + td, td, th)
+            )
+
+            for (f in faceData) {
+                val u = f.u.toFloat()
+                val v = f.v.toFloat()
+                val uw = f.w.toFloat()
+                val vh = f.h.toFloat()
+
+                // Jeśli flipX jest true, odwracamy przypisanie szerokości (uw)
+                val uLeft = if (f.flipX) u else u + uw
+                val uRight = if (f.flipX) u + uw else u
+
+                // Tworzymy wierzchołki z uwzględnieniem poprawionego UV
+                val v0 = corners[f.idx[0]].copy(u = uLeft,  v = v)
+                val v1 = corners[f.idx[1]].copy(u = uRight, v = v)
+                val v2 = corners[f.idx[2]].copy(u = uRight, v = vh + v)
+                val v3 = corners[f.idx[3]].copy(u = uLeft,  v = vh + v)
+
+                game.processAndDrawTexturedTriangle(v0, v1, v2, tex, lightVal)
+                game.processAndDrawTexturedTriangle(v0, v2, v3, tex, lightVal)
+            }
+        }
+
+    }
+
+    private data class FaceMapping(val idx: IntArray, val u: Int, val v: Int, val w: Int, val h: Int, val flipX: Boolean = false)
 
     // Mapa przechowująca maskę bitową okluzji dla każdego segmentu (index 0-63)
     // Bity: 1=West(X-), 2=East(X+), 4=Down(Y-), 8=Up(Y+), 16=North(Z-), 32=South(Z+)
@@ -4275,21 +4450,52 @@ class KapeLuz : JPanel() {
                         processInput()
                         updateWorld()
 
-                        // --- OBLICZANIE LOKALNEGO BODY YAW ---
-                        // Normalizacja yaw głowy do 0..2PI
-                        var normalizedYaw = yaw % (2 * Math.PI)
-                        if (normalizedYaw < 0) normalizedYaw += 2 * Math.PI
+                        // --- OBLICZANIE LOKALNEGO BODY YAW (Minecraft-style rotation) ---
+                        // 1. Gładkie centrowanie modelu do kierunku ruchu
+                        val isMoving = inputManager.isKeyDown(KeyEvent.VK_W) || inputManager.isKeyDown(KeyEvent.VK_S) ||
+                                       inputManager.isKeyDown(KeyEvent.VK_A) || inputManager.isKeyDown(KeyEvent.VK_D)
 
-                        // Obliczamy różnicę między głową a ciałem
-                        var diff = normalizedYaw - myBodyYaw
-                        while (diff < -Math.PI) diff += 2 * Math.PI
-                        while (diff > Math.PI) diff -= 2 * Math.PI
+                        if (isMoving) {
+                            var moveX = 0.0
+                            var moveZ = 0.0
+                            if (inputManager.isKeyDown(KeyEvent.VK_W)) moveZ += 1.0
+                            if (inputManager.isKeyDown(KeyEvent.VK_S)) moveZ -= 1.0
+                            if (inputManager.isKeyDown(KeyEvent.VK_A)) moveX -= 1.0
+                            if (inputManager.isKeyDown(KeyEvent.VK_D)) moveX += 1.0
+
+                            // Obliczamy kąt wektora ruchu relatywnie do obecnego yaw kamery
+                            val inputMoveYaw = kotlin.math.atan2(moveX, moveZ)
+                            var targetMoveYaw = yaw + inputMoveYaw
+
+                            // POPRAWKA: Jeśli idziemy do tyłu (S, S+A, S+D), nie odwracamy skina tyłem do kamery.
+                            // Jeśli kąt wychylenia ruchu od przodu jest większy niż 90 stopni (PI/2),
+                            // ustawiamy cel obrotu ciała na wprost kamery.
+                            if (kotlin.math.abs(inputMoveYaw) > Math.PI / 2.0 + 0.1) {
+                                targetMoveYaw = yaw
+                            }
+
+                            // Gładka interpolacja myBodyYaw do kierunku poruszania się
+                            var moveDiff = targetMoveYaw - myBodyYaw
+                            while (moveDiff < -Math.PI) moveDiff += 2 * Math.PI
+                            while (moveDiff > Math.PI) moveDiff -= 2 * Math.PI
+
+                            myBodyYaw += moveDiff * 0.2 // Prędkość centrowania modelu podczas chodu
+                        }
+
+                        // 2. Limit wychylenia głowy względem ciała (+- 80 stopni)
+                        // Kamera (head yaw) zawsze ma pierwszeństwo i "ciągnie" ciało po przekroczeniu limitu
+                        var normalizedHeadYaw = yaw % (2 * Math.PI)
+                        if (normalizedHeadYaw < 0) normalizedHeadYaw += 2 * Math.PI
+
+                        var headBodyDiff = normalizedHeadYaw - myBodyYaw
+                        while (headBodyDiff < -Math.PI) headBodyDiff += 2 * Math.PI
+                        while (headBodyDiff > Math.PI) headBodyDiff -= 2 * Math.PI
 
                         val bodyLimit = Math.toRadians(80.0)
-                        if (diff > bodyLimit) myBodyYaw = normalizedYaw - bodyLimit
-                        else if (diff < -bodyLimit) myBodyYaw = normalizedYaw + bodyLimit
+                        if (headBodyDiff > bodyLimit) myBodyYaw = normalizedHeadYaw - bodyLimit
+                        else if (headBodyDiff < -bodyLimit) myBodyYaw = normalizedHeadYaw + bodyLimit
 
-                        // Normalizacja bodyYaw do 0..2PI (0..360)
+                        // Normalizacja końcowa bodyYaw do 0..2PI
                         myBodyYaw = myBodyYaw % (2 * Math.PI)
                         if (myBodyYaw < 0) myBodyYaw += 2 * Math.PI
 
@@ -4857,7 +5063,7 @@ class KapeLuz : JPanel() {
             if (player.dimension != localDimension) return@forEach
             if (myIdByte != null && id == myIdByte) return@forEach
 
-            renderPlayerModel(player)
+            playerRenderer.render(this, player)
         }
 
         // --- MOD HOOK: 3D Rendering ---
@@ -5007,7 +5213,8 @@ class KapeLuz : JPanel() {
         }
     }
 
-    private fun renderPlayerModel(player: RemotePlayer) {
+    // Przeniesiona i upubliczniona logika wewnętrzna
+    fun renderPlayerModelInternal(player: RemotePlayer) {
         val s = cubeSize / 16.0
         val headSize = 8.0 * s
         val torsoSize = Triple(8.0 * s, 12.0 * s, 4.0 * s)
@@ -5092,7 +5299,8 @@ class KapeLuz : JPanel() {
         val modelFeetOffset = 6.5 * s // Najniższy punkt nóg to -0.5 - 12/2 = -6.5. Przesuwamy o tyle w górę.
 
         // Head
-        drawPart((6.0 * s) - modelCenterX, (21.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, headSize, headSize, headSize, skinColor, hYaw, finalLightVal, hPitch)
+        val headCy = (21.5 * s) + modelFeetOffset
+        drawPart((6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ, headSize, headSize, headSize, skinColor, hYaw, finalLightVal, hPitch, headCy - headSize / 2.0)
         // Torso
         drawPart((6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, torsoSize.first, torsoSize.second, torsoSize.third, shirtColor, bYaw, finalLightVal)
         // Right Arm
@@ -5526,7 +5734,7 @@ class KapeLuz : JPanel() {
         val y2 = y * cosPitch - z * sinPitch
         val z3 = z * cosPitch + y * sinPitch
         y = y2
-        z = z3
+        z = z3 // Zaktualizuj z, bo jest używane w projekcji
 
         return Vector3d(x, y, z, v.ao)
     }
@@ -5549,7 +5757,7 @@ class KapeLuz : JPanel() {
                 output.add(current) // Oba w środku -> dodajemy obecny
             } else if (currIn && !prevIn) {
                 output.add(intersectPlane(prev, current, nearPlaneZ)) // Wchodzimy do środka -> punkt przecięcia + obecny
-                output.add(current)
+            output.add(current) // Dodajemy obecny punkt
             } else if (!currIn && prevIn) {
                 output.add(intersectPlane(prev, current, nearPlaneZ)) // Wychodzimy na zewnątrz -> punkt przecięcia
             }
@@ -5570,8 +5778,10 @@ class KapeLuz : JPanel() {
         val t = (z - p1.z) / (p2.z - p1.z)
         val x = p1.x + (p2.x - p1.x) * t
         val y = p1.y + (p2.y - p1.y) * t
+        val u = p1.u + (p2.u - p1.u) * t.toFloat() // Interpolacja U
+        val v = p1.v + (p2.v - p1.v) * t.toFloat() // Interpolacja V
         val ao = p1.ao + (p2.ao - p1.ao) * t
-        return Vector3d(x, y, z, ao)
+        return Vector3d(x, y, z, ao, u, v)
     }
 
     // Zmiana na public, aby mody mogły rzutować punkty 3D na ekran 2D
@@ -5862,6 +6072,94 @@ class KapeLuz : JPanel() {
             val e2 = 2 * err
             if (e2 > -dy) { err -= dy; ix0 += sx }
             if (e2 < dx) { err += dx; iy0 += sy }
+        }
+    }
+
+    fun processAndDrawTexturedTriangle(p1: Vector3d, p2: Vector3d, p3: Vector3d, tex: BufferedImage, lightVal: Int) {
+        val t1 = transform(p1); val t2 = transform(p2); val t3 = transform(p3)
+        val line1 = Vector3d(t2.x - t1.x, t2.y - t1.y, t2.z - t1.z)
+        val line2 = Vector3d(t3.x - t1.x, t3.y - t1.y, t3.z - t1.z)
+        val normal = Vector3d(line1.y * line2.z - line1.z * line2.y, line1.z * line2.x - line1.x * line2.z, line1.x * line2.y - line1.y * line2.x)
+
+        if (t1.x * normal.x + t1.y * normal.y + t1.z * normal.z > 0) {
+            // Tworzymy Triangle3d z wierzchołkami zawierającymi UV
+            val clipped = clipTriangleAgainstPlane(Triangle3d(t1.copy(u = p1.u, v = p1.v), t2.copy(u = p2.u, v = p2.v), t3.copy(u = p3.u, v = p3.v), Color.WHITE, lightVal))
+
+            for (c in clipped) {
+                fillTexturedTriangle(project(c.p1), project(c.p2), project(c.p3), c.p1, c.p2, c.p3, tex, lightVal)
+            }
+        }
+    }
+
+    fun fillTexturedTriangle(
+        p1: Vector3d, p2: Vector3d, p3: Vector3d, // Screen points
+        v1: Vector3d, v2: Vector3d, v3: Vector3d, // Camera points (for depth/AO)
+        tex: BufferedImage, lightVal: Int
+    ) {
+        val minX = minOf(p1.x, p2.x, p3.x).toInt().coerceIn(0, baseCols)
+        val maxX = maxOf(p1.x, p2.x, p3.x).toInt().coerceIn(0, baseCols)
+        val minY = minOf(p1.y, p2.y, p3.y).toInt().coerceIn(0, baseRows)
+        val maxY = maxOf(p1.y, p2.y, p3.y).toInt().coerceIn(0, baseRows)
+
+        val det = (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y)
+        if (abs(det) < 1e-6) return
+
+        val z1Inv = 1.0 / v1.z; val z2Inv = 1.0 / v2.z; val z3Inv = 1.0 / v3.z
+        val ao1z = v1.ao * z1Inv; val ao2z = v2.ao * z2Inv; val ao3z = v3.ao * z3Inv
+
+        // Pre-kalkulacja skorygowanych współrzędnych UV dla wierzchołków
+        val u1z = v1.u * z1Inv; val v1z = v1.v * z1Inv
+        val u2z = v2.u * z2Inv; val v2z = v2.v * z2Inv
+        val u3z = v3.u * z3Inv; val v3z = v3.v * z3Inv
+
+        val skyL = (lightVal shr 4) and 0xF
+        val blockL = lightVal and 0xF
+
+        for (py in minY..maxY) {
+            for (px in minX..maxX) {
+                val l1 = ((p2.y - p3.y) * (px - p3.x) + (p3.x - p2.x) * (py - p3.y)) / det
+                val l2 = ((p3.y - p1.y) * (px - p3.x) + (p1.x - p3.x) * (py - p3.y)) / det
+                val l3 = 1.0 - l1 - l2
+
+                if (l1 >= 0 && l2 >= 0 && l3 >= 0) {
+                    val zRecip = l1 * z1Inv + l2 * z2Inv + l3 * z3Inv
+                    val depth = 1.0 / zRecip
+
+                    if (depth < zBuffer[py][px]) {
+                        // Skorygowana interpolacja UV (Perspective Correct)
+                        val u = (l1 * u1z + l2 * u2z + l3 * u3z) * depth
+                        val v = (l1 * v1z + l2 * v2z + l3 * v3z) * depth
+                        
+                        val tx = u.toInt().coerceIn(0, tex.width - 1)
+                        val ty = v.toInt().coerceIn(0, tex.height - 1)
+                        
+                        val argb = tex.getRGB(tx, ty)
+                        if ((argb shr 24 and 0xFF) < 128) continue // Transparency cut-off
+
+                        zBuffer[py][px] = depth
+                        
+                        val baseColor = Color(argb)
+                        val finalRGB = if (!debugFullbright) {
+                            lightProcessor.process(
+                                (v1.x * l1 + v2.x * l2 + v3.x * l3 + camX).toInt(),
+                                (v1.y * l1 + v2.y * l2 + v3.y * l3 + viewY).toInt(),
+                                (v1.z * l1 + v2.z * l2 + v3.z * l3 + camZ).toInt(),
+                                baseColor, skyL, blockL, globalSunIntensity, minLightFactor
+                            )
+                        } else {
+                            argb
+                        }
+
+                        val ao = (l1 * ao1z + l2 * ao2z + l3 * ao3z) * depth
+                        
+                        val r = (((finalRGB shr 16) and 0xFF) * ao).toInt()
+                        val g = (((finalRGB shr 8) and 0xFF) * ao).toInt()
+                        val b = ((finalRGB and 0xFF) * ao).toInt()
+                        
+                        backBuffer[py * imageWidth + px] = (r shl 16) or (g shl 8) or b
+                    }
+                }
+            }
         }
     }
 

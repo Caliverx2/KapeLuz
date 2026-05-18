@@ -64,7 +64,8 @@ data class CubeFace(
     val pTL: Point3D, val pTR: Point3D, val pBL: Point3D, val pBR: Point3D,
     val textureX: Int, val textureY: Int, val texW: Int, val texH: Int,
     val isOverlay: Boolean = false,
-    val color: Color? = null // Jeśli ustawiony, używamy koloru zamiast tekstury dla wydajności/szczelności
+    val color: Color? = null,
+    val flipX: Boolean = false
 )
 
 class Skin3DRenderPanel : JPanel() {
@@ -136,7 +137,7 @@ class Skin3DRenderPanel : JPanel() {
             CubeFace(v0, v1, v3, v2, texX + td, texY + td, tw, th, isOverlay),           // Przód
             CubeFace(v5, v4, v6, v7, texX + td * 2 + tw, texY + td, tw, th, isOverlay),   // Tył
             CubeFace(v4, v5, v0, v1, texX + td, texY, tw, td, isOverlay),               // Góra
-            CubeFace(v6, v7, v2, v3, texX + td + tw, texY, tw, td, isOverlay),          // Dół (Lustro góra/dół)
+            CubeFace(v6, v7, v2, v3, texX + td + tw, texY, tw, td, isOverlay, flipX = true), // Dół
             CubeFace(v1, v5, v2, v6, texX + td + tw, texY + td, td, th, isOverlay),      // Lewo
             CubeFace(v4, v0, v7, v3, texX, texY + td, td, th, isOverlay)                // Prawo
         )
@@ -328,10 +329,16 @@ class Skin3DRenderPanel : JPanel() {
                             face.color.rgb
                         } else {
                             // Interpolacja UV dla tekstury
-                            val u = (l1 * u1 + l2 * u2 + l3 * u3) * (face.texW - 0.001)
-                            val v = (l1 * v1 + l2 * v2 + l3 * v3) * (face.texH - 0.001)
-                            val tx = face.textureX + u.toInt()
-                            val ty = face.textureY + v.toInt()
+                            var u = l1 * u1 + l2 * u2 + l3 * u3
+                            val v = l1 * v1 + l2 * v2 + l3 * v3
+
+                            // Jeśli flaga lustra jest aktywna, odwracamy lokalne U (1.0 - u)
+                            if (face.flipX) {
+                                u = 1.0 - u
+                            }
+
+                            val tx = face.textureX + (u * (face.texW - 0.001)).toInt()
+                            val ty = face.textureY + (v * (face.texH - 0.001)).toInt()
                             
                             if (tx in 0 until img.width && ty in 0 until img.height) {
                                 val c = img.getRGB(tx, ty)

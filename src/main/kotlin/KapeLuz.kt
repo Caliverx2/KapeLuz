@@ -1420,7 +1420,8 @@ class KapeLuz : JPanel() {
         // Początkowy ekwipunek
         addItem("#FF0000", 64); addItem("#00FF00", 64); addItem("#0000FF", 64)
         addItem("$BLOCK_ID_LIGHT", 64); addItem("$BLOCK_ID_LAVA", 64); addItem("$BLOCK_ID_WATER", 64)
-        addItem("#FFFFFF80", 32)
+        addItem("#FF000080", 32)
+        addItem("#00FF0080", 32)
 
         // Generowanie gwiazd (jeśli jeszcze nie ma)
         if (stars.isEmpty()) {
@@ -5002,6 +5003,21 @@ class KapeLuz : JPanel() {
             }
         }
 
+        // --- RENDER REMOTE PLAYERS (Zintegrowane przed przezroczystością) ---
+        val myIdByte = myPlayerId.toByteOrNull()
+        remotePlayers.forEach { (id, player) ->
+            if (player.dimension != localDimension) return@forEach
+            if (myIdByte != null && id == myIdByte) return@forEach
+
+            playerRenderer.render(this, player)
+        }
+
+        // --- RENDER ENTITIES (Itemy) ---
+        renderEntities()
+
+        // --- MOD HOOK: 3D Rendering ---
+        modLoader.notifyRender3D()
+
         // 4. Projekcja i Rasteryzacja (Bloki przezroczyste)
         // Sortowanie od tyłu do przodu dla poprawnego blendingu
         transparentTrianglesToRaster.sortByDescending { (it.p1.z + it.p2.z + it.p3.z) / 3.0 }
@@ -5055,21 +5071,6 @@ class KapeLuz : JPanel() {
                 debugActiveDropsList.forEach { pos -> drawSelectionBox(pos, Color.GREEN) }
             }
         }
-
-        // --- RENDER REMOTE PLAYERS ---
-        val myIdByte = myPlayerId.toByteOrNull()
-        remotePlayers.forEach { (id, player) ->
-            // Render only if in same dimension
-            if (player.dimension != localDimension) return@forEach
-            if (myIdByte != null && id == myIdByte) return@forEach
-
-            playerRenderer.render(this, player)
-        }
-
-        // --- MOD HOOK: 3D Rendering ---
-        modLoader.notifyRender3D()
-
-        renderEntities()
     }
 
     private fun renderSky() {

@@ -5,19 +5,163 @@ import java.util.Random
 import kotlin.math.floor
 import kotlin.math.sqrt
 
+data class Biome(
+    val name: String,
+    val surfaceColor: Int,
+    val subsurfaceColor: Int,
+    val baseHeight: Double,
+    val heightVariation: Double, // Jak bardzo wysokość może się różnić od baseHeight
+    val treeDensity: Double, // Gęstość drzew w biomie (0.0 - 1.0)
+    val rarityThreshold: Double = 0.0, // 0.0 = zawsze możliwy, 1.0 = ekstremalnie rzadki. Biom pojawia się tylko jeśli globalRarity > rarityThreshold
+    val sizeScaleModifier: Double = 1.0 // Modyfikator skali szumów klimatycznych/kontynentalnych dla tego biomu. >1.0 dla mniejszych, bardziej poszarpanych łat (mini-biom)
+)
+
+data class CaveBiome(
+    val name: String,
+    val wallColor: Int,
+    val floorColor: Int
+)
+
+object Biomes {
+    private val GRASS_TEMPERATE = Color(0x59A608).rgb
+    private val GRASS_COLD = Color(0x739C67).rgb
+    private val GRASS_SAVANNA = Color(0xBFB75E).rgb
+    private val DIRT = Color(0x6c3c0c).rgb
+    private val SAND = Color(0xDBCE9E).rgb
+    private val SNOW = Color(0xFFFFFF).rgb
+    private val STONE = Color(0x8EA3A1).rgb
+    
+    // Biomy Jaskiniowe
+    val DEFAULT_CAVE = CaveBiome("Deep Caves", STONE, STONE)
+    val LUSH_CAVE = CaveBiome("Lush Caves", Color(0x3B5905).rgb, Color(0x59A608).rgb)
+    val DRIPSTONE_CAVE = CaveBiome("Dripstone", Color(0x4D3826).rgb, Color(0x4D3826).rgb)
+
+    // 10 Głównych biomów
+    val SNOWY_TUNDRA = Biome("Snowy Tundra", SNOW, DIRT, 58.0, 2.0, 0.0001, rarityThreshold = 0.0)
+    val SNOWY_TAIGA = Biome("Snowy Taiga", SNOW, DIRT, 62.0, 5.0, 0.02, rarityThreshold = 0.0)
+    val MOUNTAIN_MEADOW = Biome("Mountain Meadow", GRASS_COLD, DIRT, 78.0, 12.0, 0.001, rarityThreshold = 0.1) // Lekko rzadsze góry
+    val MOUNTAIN_TAIGA = Biome("Mountain Taiga", GRASS_COLD, DIRT, 82.0, 15.0, 0.025, rarityThreshold = 0.15) // Rzadsze góry
+    val PLAINS = Biome("Plains", GRASS_TEMPERATE, DIRT, 57.0, 3.0, 0.0005, rarityThreshold = 0.0)
+    val FOREST = Biome("Forest", GRASS_TEMPERATE, DIRT, 60.0, 6.0, 0.03, rarityThreshold = 0.0)
+    val DESERT = Biome("Desert", SAND, SAND, 56.0, 2.0, 0.0, rarityThreshold = 0.0)
+    val SAVANNA = Biome("Savanna", GRASS_SAVANNA, DIRT, 63.0, 7.0, 0.005, rarityThreshold = 0.0)
+    val BEACH = Biome("Beach", SAND, SAND, 51.0, 1.0, 0.0, rarityThreshold = 0.0)
+    val OCEAN = Biome("Ocean", DIRT, DIRT, 38.0, 4.0, 0.0, rarityThreshold = 0.0)
+
+    // Przykładowe mini-biomy i rzadkie biomy
+    val MINI_FOREST = Biome("Mini Forest", GRASS_TEMPERATE, DIRT, 60.0, 5.0, 0.05, rarityThreshold = 0.4, sizeScaleModifier = 2.5) // Małe, gęste lasy, rzadsze
+    val RARE_MOUNTAIN_PEAK = Biome("Rare Mountain Peak", STONE, STONE, 95.0, 8.0, 0.0, rarityThreshold = 0.8, sizeScaleModifier = 1.5) // Bardzo rzadkie, wysokie szczyty
+}
+
+class BiomeProvider(val seed: Int) {
+    private val temperatureNoise = PerlinNoise(seed + 10)
+    private val moistureNoise = PerlinNoise(seed + 20)
+    private val continentalnessNoise = PerlinNoise(seed + 30)
+    private val rarityNoise = PerlinNoise(seed + 40) // Szum do globalnej rzadkości biomów
+
+    // Bazowe skale szumów
+    private val baseClimateScale = 0.001 // Zmniejszone biomy (częstsza zmiana)
+    private val baseContinentalScale = 0.001
+    private val baseRarityScale = 0.0014 // Skalowanie rzadkości dostosowane do wielkości biomów
+    
+    private val caveBiomeNoise = PerlinNoise(seed + 50)
+    private val caveClimateScale = 0.02
+
+    fun getBiome(wx: Int, wz: Int): Biome {
+        // 1. Pobieramy globalne wartości szumów
+        val globalTemp = temperatureNoise.noise(wx * baseClimateScale, wz * baseClimateScale)
+        val globalMoisture = moistureNoise.noise(wx * baseClimateScale, wz * baseClimateScale)
+        val globalElevation = continentalnessNoise.noise(wx * baseContinentalScale, wz * baseContinentalScale)
+        val globalRarity = rarityNoise.noise(wx * baseRarityScale, wz * baseRarityScale)
+
+        // 2. BIOMY INNE (Mogą sąsiadować z każdym, zależne od wysokości/rzadkości)
+        if (globalElevation < -0.4) return Biomes.OCEAN
+        if (globalElevation < -0.3) return Biomes.BEACH
+        
+        // Rzadki szczyt jako "biom inny" - pojawia się bardzo rzadko na wysokich terenach
+        if (globalElevation > 0.4 && (globalRarity + 0.5) / 1.0 > Biomes.RARE_MOUNTAIN_PEAK.rarityThreshold) {
+            return Biomes.RARE_MOUNTAIN_PEAK
+        }
+
+        // 3. PODZIAŁ NA STREFY (Gwarantuje poprawne sąsiedztwo klimatyczne)
+        // Snowy (< -0.3) <-> Cold (-0.3 do 0.0) <-> Temperate (0.0 do 0.4) <-> Warm (> 0.4)
+        
+        return when {
+            globalTemp < -0.3 -> { // --- BIOMY OŚNIEŻONE ---
+                if (globalMoisture > 0.0) Biomes.SNOWY_TAIGA else Biomes.SNOWY_TUNDRA
+            }
+            
+            globalTemp < 0.0 -> { // --- BIOMY ZIMNE ---
+                // Tutaj sprawdzamy rzadkość występowania specyficznych gór
+                val normalizedRarity = (globalRarity + 0.7) / 1.4
+                if (normalizedRarity > Biomes.MOUNTAIN_TAIGA.rarityThreshold && globalMoisture > -0.1) {
+                    Biomes.MOUNTAIN_TAIGA
+                } else if (normalizedRarity > Biomes.MOUNTAIN_MEADOW.rarityThreshold) {
+                    Biomes.MOUNTAIN_MEADOW
+                } else {
+                    // Jeśli góry są "zbyt rzadkie" w tym punkcie, dajemy biom przejściowy (np. tundra)
+                    Biomes.SNOWY_TUNDRA 
+                }
+            }
+            
+            globalTemp < 0.4 -> { // --- BIOMY UMIARKOWANE ---
+                // Obsługa MINI_BIOMU (rzadki i gęsty las)
+                val normalizedRarity = (globalRarity + 0.7) / 1.4
+                if (normalizedRarity > Biomes.MINI_FOREST.rarityThreshold) {
+                    // Dla mini-biomów przeliczamy lokalną wilgotność z ich własną skalą
+                    val localScale = baseClimateScale * Biomes.MINI_FOREST.sizeScaleModifier
+                    val localMoisture = moistureNoise.noise(wx * localScale, wz * localScale)
+                    if (localMoisture > 0.1) return Biomes.MINI_FOREST
+                }
+                
+                if (globalMoisture > 0.0) Biomes.FOREST else Biomes.PLAINS
+            }
+            
+            else -> { // --- BIOMY CIEPŁE ---
+                if (globalMoisture > -0.1) Biomes.SAVANNA else Biomes.DESERT
+            }
+        }
+    }
+
+    fun getCaveBiome(wx: Int, wy: Int, wz: Int): CaveBiome {
+        val n = caveBiomeNoise.noise(wx * caveClimateScale, wy * caveClimateScale, wz * caveClimateScale)
+        return when {
+            n > 0.3 -> Biomes.LUSH_CAVE
+            n < -0.3 -> Biomes.DRIPSTONE_CAVE
+            else -> Biomes.DEFAULT_CAVE
+        }
+    }
+}
+
+/**
+ * Klasa pomocnicza do definiowania warunków dla biomu.
+ * Upraszcza logikę wyboru biomu w BiomeProvider.
+ */
+data class BiomeCondition(
+    val biome: Biome,
+    val tempRange: ClosedRange<Double>,
+    val moistureRange: ClosedRange<Double>,
+    val elevationRange: ClosedRange<Double>? = null // Opcjonalny zakres wysokości (dla gór, dolin itp.)
+) {
+    fun matches(temp: Double, moisture: Double, elevation: Double): Boolean {
+        return temp in tempRange && moisture in moistureRange && (elevationRange == null || elevation in elevationRange)
+    }
+}
+
 open class ChunkGenerator(
     val seed: Int,
     val oreColors: MutableSet<Int>
 ) {
     val noise = PerlinNoise(seed)
     val caveNoise = PerlinNoise(seed + 1)
+    val biomeProvider = BiomeProvider(seed)
 
-    // Constants
     val BLOCK_ID_AIR = 0
     val BLOCK_ID_LIGHT = 2
     val BLOCK_ID_LAVA = 3
+    val BLOCK_ID_WATER = 4
+    val SEA_LEVEL = 50
 
-    // Models (Assuming these are available in the package)
     val treeModel = treeModelData
     val DungeonModel = DungeonModelData
     val IglooModel = IglooModelData
@@ -25,19 +169,32 @@ open class ChunkGenerator(
     open fun generate(cx: Int, cz: Int): Chunk {
         val chunk = Chunk(cx, cz)
 
-        // 1. Generowanie terenu i jaskiń
+        // 1. GENERACJA POWIERZCHNI (Bez wpływu jaskiń)
+        for (lx in 0 until 16) {
+            for (lz in 0 until 16) {
+                val wx = cx * 16 + lx
+                val wz = cz * 16 + lz
+                val biome = biomeProvider.getBiome(wx, wz)
+                val h = getTerrainHeight(wx, wz)
+                
+                chunk.setBlock(lx, 0, lz, Color.BLACK.rgb) // Bedrock
+                for (y in 1..127) {
+                    val block = getSurfaceBlock(y, h, biome)
+                    if (block != BLOCK_ID_AIR) {
+                        chunk.setBlock(lx, y, lz, block)
+                    }
+                }
+            }
+        }
+
+        // 2. GENERACJA JASKIŃ (Rzeźbienie w postawionym terenie) //zaraz naprawiamy to dziadostwo
         for (lx in 0 until 16) {
             for (lz in 0 until 16) {
                 val wx = cx * 16 + lx
                 val wz = cz * 16 + lz
                 val h = getTerrainHeight(wx, wz)
-
-                for (y in 0..127) {
-                    val blockColor = computeWorldBlock(wx, y, wz, h)
-                    if (blockColor != BLOCK_ID_AIR) {
-                        chunk.setBlock(lx, y, lz, blockColor)
-                    }
-                }
+                
+                carveCaves(chunk, lx, lz, wx, wz, h)
             }
         }
 
@@ -47,50 +204,124 @@ open class ChunkGenerator(
         // 3. Generowanie jezior lawy
         generateLavaLakes(chunk, cx, cz)
 
-        // 4. Generowanie struktur
-        generateStructureType(chunk, cx, cz, treeModel, 0.004, 50, 128, Color(0x59A608).rgb, 1)
+        // 4. Generowanie struktur na bazie biomów i globalnych
+        generateBiomeStructures(chunk, cx, cz)
         generateStructureType(chunk, cx, cz, DungeonModel, 0.0001, 0, 30, Color(0x8EA3A1).rgb, 1, true, listOf(0, 90, 180, 270))
-        generateStructureType(chunk, cx, cz, IglooModel, 0.00001, 50, 80, Color(0x59A608).rgb, 0, false, listOf(0, 90, 180, 270))
+        generateStructureType(chunk, cx, cz, IglooModel, 0.00005, 52, 80, Biomes.SNOWY_TUNDRA.surfaceColor, 0, false, listOf(0, 90, 180, 270))
 
         chunk.modified = false
         return chunk
     }
 
     open fun getTerrainHeight(wx: Int, wz: Int): Int {
+        // Zwiększony promień i gęstsze próbkowanie (9 punktów zamiast 5)
+        // To eliminuje "ściany" poprzez łagodniejsze mieszanie baseHeight
+        val radius = 8 
+        var totalBaseHeight = 0.0
+        var totalHeightVariation = 0.0
+        var weightSum = 0.0
+
+        for (dx in -radius..radius step radius) {
+            for (dz in -radius..radius step radius) {
+                val b = biomeProvider.getBiome(wx + dx, wz + dz)
+                // Odległość od środka jako waga (środek ma największy wpływ)
+                val weight = 1.0 / (sqrt((dx * dx + dz * dz).toDouble()) + 1.0)
+                totalBaseHeight += b.baseHeight * weight
+                totalHeightVariation += b.heightVariation * weight
+                weightSum += weight
+            }
+        }
+
+        val blendedBaseHeight = totalBaseHeight / weightSum
+        val blendedVariation = totalHeightVariation / weightSum
+
         val n = noise.noise(wx * 0.02, wz * 0.02)
-        return (58 + n * 6).toInt().coerceIn(0, 127)
+        val calculatedHeight = blendedBaseHeight + (n * blendedVariation)
+        return calculatedHeight.toInt().coerceIn(0, 127)
     }
 
-    open fun computeWorldBlock(wx: Int, wy: Int, wz: Int, precalcHeight: Int? = null): Int {
-        if (wy < 0) return BLOCK_ID_AIR
-        if (wy == 0) return Color.BLACK.rgb // Bedrock
-
-        val h = precalcHeight ?: getTerrainHeight(wx, wz)
-        if (wy > h) return BLOCK_ID_AIR
-
-        val baseColor = when {
-            wy == h -> Color(0x59A608).rgb
-            wy > h - 4 -> Color(0x6c3c0c).rgb
-            else -> Color(0x8EA3A1).rgb
+    // Czysta logika powierzchni
+    private fun getSurfaceBlock(wy: Int, terrainHeight: Int, biome: Biome): Int {
+        if (wy > terrainHeight) {
+            return if (wy <= SEA_LEVEL) BLOCK_ID_WATER else BLOCK_ID_AIR
         }
-
-        if (wy == 1) return baseColor
-
-        val baseCaveThreshold = 0.65
-        val surfaceOpeningResistance = 0.2
-        val frequency = 0.07
-        val noiseVal = caveNoise.noise(wx * frequency, wy * frequency * 2, wz * frequency)
-
-        val depth = h - wy
-        val threshold = if (depth < 5) {
-            baseCaveThreshold + surfaceOpeningResistance * (1.0 - depth / 5.0)
-        } else {
-            baseCaveThreshold
+        
+        val stoneDepth = 4
+        return when {
+            wy == terrainHeight -> if (terrainHeight >= SEA_LEVEL) biome.surfaceColor else biome.subsurfaceColor
+            wy > terrainHeight - stoneDepth -> biome.subsurfaceColor
+            else -> Color(0x8EA3A1).rgb // Stone
         }
+    }
 
-        if (noiseVal > threshold) return BLOCK_ID_AIR
+    // Czysta logika jaskiń
+    private fun carveCaves(chunk: Chunk, lx: Int, lz: Int, wx: Int, wz: Int, terrainHeight: Int) {
+        // Zwiększamy częstotliwość dla mniejszych, bardziej "pokręconych" korytarzy
+        val frequency = 0.05 
+        // Próg dla "spaghetti" - im mniejszy, tym węższe tunele (efekt robaka)
+        val tunnelThreshold = 0.14
+        val surfaceOpeningResistance = 0.15
 
-        return baseColor
+        for (y in 1..terrainHeight) {
+            // Technika "Double Noise" dla jaskiń typu 1.12:
+            // Tworzymy dwie "wstęgi" szumu. Tam gdzie się przecinają, powstaje tunel.
+            val n1 = caveNoise.noise(wx * frequency, y * frequency, wz * frequency)
+            val n2 = caveNoise.noise(wx * frequency + 100.0, y * frequency + 100.0, wz * frequency + 100.0)
+            
+            // Połączenie dwóch szumów tworzy okrągły przekrój tunelu
+            val combinedNoise = Math.sqrt(n1 * n1 + n2 * n2)
+            
+            val depth = terrainHeight - y
+            
+            // Dynamiczne zwężanie tuneli przy powierzchni
+            val currentCaveWidth = if (depth < 12) {
+                (tunnelThreshold - surfaceOpeningResistance * (1.0 - depth / 12.0)).coerceAtLeast(0.0)
+            } else {
+                tunnelThreshold
+            }
+
+            // Jeśli wypadkowa dwóch szumów jest mała, wycinamy blok
+            if (combinedNoise < currentCaveWidth) {
+                chunk.setBlock(lx, y, lz, BLOCK_ID_AIR)
+                
+                // Fundamenty pod biomy jaskiniowe: Malowanie podłogi jaskini
+                // Jeśli blok pod nami (y-1) jest kamieniem, zmieńmy go na kolor biomu jaskiniowego
+                if (y > 1 && chunk.getBlock(lx, y - 1, lz) != BLOCK_ID_AIR) {
+                    val caveBiome = biomeProvider.getCaveBiome(wx, y, wz)
+                    if (caveBiome != Biomes.DEFAULT_CAVE) {
+                        chunk.setBlock(lx, y - 1, lz, caveBiome.floorColor)
+                    }
+                }
+                // Malowanie sufitu
+                if (y < 127 && chunk.getBlock(lx, y + 1, lz) != BLOCK_ID_AIR) {
+                    val caveBiome = biomeProvider.getCaveBiome(wx, y, wz)
+                    chunk.setBlock(lx, y + 1, lz, caveBiome.wallColor)
+                }
+            }
+        }
+    }
+
+    open fun generateBiomeStructures(chunk: Chunk, cx: Int, cz: Int) {
+        val margin = 10
+        val modelCache = mutableMapOf<Int, List<ModelVoxel>>()
+
+        for (lx in -margin..16 + margin) {
+            for (lz in -margin..16 + margin) {
+                val wx = cx * 16 + lx
+                val wz = cz * 16 + lz
+                val biome = biomeProvider.getBiome(wx, wz)
+
+                if (biome.treeDensity > 0.0 && isStructureAt(wx, wz, biome.treeDensity, treeModel.hashCode())) {
+                    val h = getTerrainHeight(wx, wz)
+
+                    if (h >= SEA_LEVEL && getSurfaceBlock(h, h, biome) == biome.surfaceColor) {
+                        val rotation = 0
+                        val finalModel = modelCache.getOrPut(rotation) { rotateModel(treeModel, rotation) }
+                        placeStructure(chunk, lx, h + 1, lz, finalModel, false)
+                    }
+                }
+            }
+        }
     }
 
     open fun generateOres(chunk: Chunk, cx: Int, cz: Int) {
@@ -237,8 +468,11 @@ open class ChunkGenerator(
                     val startY = maxOf(minH, 0)
                     val endY = minOf(maxH, 127)
 
+                    val biome = biomeProvider.getBiome(wx, wz)
+                    val h = getTerrainHeight(wx, wz)
+
                     for (y in startY..endY) {
-                        if (computeWorldBlock(wx, y, wz) == targetBlock && computeWorldBlock(wx, y + 1, wz) == BLOCK_ID_AIR) {
+                        if (getSurfaceBlock(y, h, biome) == targetBlock && getSurfaceBlock(y + 1, h, biome) == BLOCK_ID_AIR) {
                             validYs.add(y)
                         }
                     }
@@ -386,7 +620,7 @@ class PerlinNoise(seed: Int) {
         val BA = p[B] + Z
         val BB = p[B + 1] + Z
 
-        val res = lerp(w,
+        return lerp(w,
             lerp(v,
                 lerp(u, grad(p[AA], xf, yf, zf), grad(p[BA], xf - 1, yf, zf)),
                 lerp(u, grad(p[AB], xf, yf - 1, zf), grad(p[BB], xf - 1, yf - 1, zf))
@@ -396,13 +630,17 @@ class PerlinNoise(seed: Int) {
                 lerp(u, grad(p[AB + 1], xf, yf - 1, zf - 1), grad(p[BB + 1], xf - 1, yf - 1, zf - 1))
             )
         )
-        return (res + 1) / 2.0 // Bring to 0..1 range
     }
     fun fade(t: Double) = t * t * t * (t * (t * 6 - 15) + 10)
     fun lerp(t: Double, a: Double, b: Double) = a + t * (b - a)
-    fun grad(hash: Int, x: Double, y: Double) = if (hash and 1 == 0) x else -x + if (hash and 2 == 0) y else -y
+    
+    fun grad(hash: Int, x: Double, y: Double): Double {
+        val u = if (hash and 1 == 0) x else -x
+        val v = if (hash and 2 == 0) y else -y
+        return u + v
+    }
+
     fun grad(hash: Int, x: Double, y: Double, z: Double): Double {
-        // Standardowa implementacja gradientu dla 3D Perlin Noise
         val h = hash and 15
         val u = if (h < 8) x else y
         val v = if (h < 4) y else if (h == 12 || h == 14) x else z

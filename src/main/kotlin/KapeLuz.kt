@@ -2378,12 +2378,20 @@ class KapeLuz : JPanel() {
     private fun generateChunk(cx: Int, cz: Int, dim: String = localDimension): Chunk {
         // 0. Próba wczytania z dysku
         val loadedChunk = chunkIO.loadChunk(cx, cz, dim)
-        if (loadedChunk != null) return loadedChunk
+        val chunk = loadedChunk ?: chunkGenerator.generate(cx, cz)
 
-        // 1. Jeśli nie ma na dysku, generujemy nowy.
-        // UWAGA: Oświetlenie jest liczone przez `refreshChunkData`, które jest wołane zaraz po tej funkcji.
-        // To zapobiega podwójnemu, niepotrzebnemu przeliczaniu światła.
-        return chunkGenerator.generate(cx, cz)
+        // Normalizacja płynów: Ustawienie poziomu 8 dla nowo wygenerowanej/wczytanej wody/lawy,
+        // która ma meta 0. Dzięki temu woda jest pełna nawet przy gameFrozen.
+        for (i in chunk.blocks.indices) {
+            val blockId = chunk.blocks[i]
+            if (fluidBlocks.contains(blockId)) {
+                if (chunk.metadata[i].toInt() == 0) {
+                    chunk.metadata[i] = 8.toByte()
+                }
+            }
+        }
+
+        return chunk
     }
 
     private fun calculateLighting(chunk: Chunk) {
@@ -3262,7 +3270,8 @@ class KapeLuz : JPanel() {
 
                     if (fluidBlocks.contains(rawBlock)) {
                         isFluid = true
-                        myLevel = chunk.getMeta(lx, y, lz) and 0xF // Odczytujemy tylko 4 dolne bity (poziom)
+                        val rawMeta = chunk.getMeta(lx, y, lz) and 0xF
+                        myLevel = if (rawMeta == 0) 8 else rawMeta // Zabezpieczenie renderera
                         // Poziom 8 (źródło) = 0.9 (prawie pełny), Poziom 1 = 0.125
                         // Jeśli nad nami jest ten sam płyn, to renderujemy jako pełny (1.0)
                         val blockAbove = if (y < 127) chunk.getBlock(lx, y + 1, lz) else 0
@@ -4015,6 +4024,13 @@ class KapeLuz : JPanel() {
         // Czyścimy debugowanie spadków na początku ticku fizyki
         debugActiveDropsList.clear()
 
+        // Helper do sprawdzania czy blok należy do aktywnego chunka (zasięg symulacji)
+        fun isActive(gx: Int, gz: Int): Boolean {
+            val ncx = if (gx >= 0) gx / 16 else (gx + 1) / 16 - 1
+            val ncz = if (gz >= 0) gz / 16 else (gz + 1) / 16 - 1
+            return activeChunks.contains(Point(ncx, ncz))
+        }
+
         val updates = HashMap<Point, MutableList<Triple<BlockPos, Int, Int>>>() // Chunk -> List(Pos, BlockID, Level)
 
         for (chunkPos in activeChunks) {
@@ -4151,10 +4167,10 @@ class KapeLuz : JPanel() {
                                     // Zmiana: Szukamy spadku TYLKO jeśli jesteśmy źródłem (level >= 8)
                                     if (level >= 8) {
                                         // Obliczamy koszt (dystans do spadku) dla każdego kierunku - TYLKO LINIOWO
-                                        costs[0] = calculateLinearFlowCost(wx + 1, y, wz, 1, 0, range, blockId) // East
-                                        costs[1] = calculateLinearFlowCost(wx - 1, y, wz, -1, 0, range, blockId) // West
-                                        costs[2] = calculateLinearFlowCost(wx, y, wz + 1, 0, 1, range, blockId) // South
-                                        costs[3] = calculateLinearFlowCost(wx, y, wz - 1, 0, -1, range, blockId) // North
+                                        costs[0] = if (isActive(wx + 1, wz)) calculateLinearFlowCost(wx + 1, y, wz, 1, 0, range, blockId) else 1000
+                                        costs[1] = if (isActive(wx - 1, wz)) calculateLinearFlowCost(wx - 1, y, wz, -1, 0, range, blockId) else 1000
+                                        costs[2] = if (isActive(wx, wz + 1)) calculateLinearFlowCost(wx, y, wz + 1, 0, 1, range, blockId) else 1000
+                                        costs[3] = if (isActive(wx, wz - 1)) calculateLinearFlowCost(wx, y, wz - 1, 0, -1, range, blockId) else 1000
 
                                         minCost = costs.minOrNull() ?: 1000
 
@@ -4205,6 +4221,10 @@ class KapeLuz : JPanel() {
                                         }
 
                                         val (nx, nz, childParentDir) = neighbors[i]
+
+                                        // Nie rozlewaj cieczy poza aktywny obszar symulacji
+                                        if (!isActive(nx, nz)) continue
+
                                         val nBlock = getRawBlock(nx, y, nz)
                                         var newMeta = (level - 1) or (childParentDir shl 4)
                                         // Przekazujemy flagę strumienia dalej

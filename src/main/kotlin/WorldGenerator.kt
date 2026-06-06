@@ -197,7 +197,7 @@ open class ChunkGenerator(
                 carveCaves(chunk, lx, lz, wx, wz, h)
             }
         }
-
+        //chwilowe komplikacje nastały - globalne uziemienie kodu
         // 2. Generowanie rud
         generateOres(chunk, cx, cz)
 

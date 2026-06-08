@@ -1447,7 +1447,7 @@ class UIPlayerList : UIComponent() {
         if (game.myPlayerId == "") myId = "host" else myId = game.myPlayerId
 
         val PlayerCount = "Players (${game.remotePlayers.size+1}):"
-        val SessionID = ":  : ${myId} (${floor((game.camX + (game.cubeSize/2))/2).toInt()}, ${floor((game.camY + (game.cubeSize/2))/2).toInt()+5}, ${floor((game.camZ + (game.cubeSize/2)) /2).toInt()})"
+        val SessionID = ":  : ${game.playerName} (${floor((game.camX + (game.cubeSize/2))/2).toInt()}, ${floor((game.camY + (game.cubeSize/2))/2).toInt()+5}, ${floor((game.camZ + (game.cubeSize/2)) /2).toInt()})"
         // Obliczenia dla wyśrodkowania listy (-200 do +200 od środka)
         val centerX = game.uiReferenceWidth / 2
         val listWidth = 400
@@ -1466,8 +1466,8 @@ class UIPlayerList : UIComponent() {
         g.drawString(SessionID, textX, fm.ascent*2 + 10)
 
         var i = 0
-        game.remotePlayers.forEach { (netId, player) ->
-            val playerText = ":  : $netId (${(floor((player.x + (game.cubeSize/2))/2)).toSmartString()}, ${(floor((player.y + (game.cubeSize/2))/2)+5).toSmartString()}, ${(floor((player.z + (game.cubeSize/2))/2)).toSmartString()})"
+        game.remotePlayers.forEach { ( netID, player) ->
+            val playerText = ":  : ${player.playerName} (${(floor((player.x + (game.cubeSize/2))/2)).toSmartString()}, ${(floor((player.y + (game.cubeSize/2))/2)+5).toSmartString()}, ${(floor((player.z + (game.cubeSize/2))/2)).toSmartString()})"
 
             g.color = Color(0.82f, 0.82f, 0.82f, 0.25f)
             g.fillRect(startX, fm.ascent * (2 + i) + 15, listWidth, fm.ascent)

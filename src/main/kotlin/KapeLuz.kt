@@ -40,7 +40,7 @@ data class Triangle3d(
 data class ModelVoxel(val x: Int, val y: Int, val z: Int, val color: Color, val isVoid: Boolean = false)
 
 // Struktura dla innych graczy (Multiplayer)
-data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0, var dimension: String = "overworld", var hasReceivedEntities: Boolean = false, var bodyYaw: Double = yaw)
+data class RemotePlayer(var x: Double, var y: Double, var z: Double, var yaw: Double, var pitch: Double, var lastUpdate: Long = 0, var lastKeepAlive: Long = 0, var dimension: String = "overworld", var hasReceivedEntities: Boolean = false, var bodyYaw: Double = yaw, var skinId: String = "default", var playerName: String = "Player")
 
 abstract class Entity(
     var x: Double, var y: Double, var z: Double,
@@ -129,7 +129,7 @@ interface PlayerRenderer {
     fun render(game: KapeLuz, player: RemotePlayer)
 }
 
-class KapeLuz : JPanel() {
+class KapeLuz(val playerName: String = "Player") : JPanel() {
     val downscale = 8
     val baseCols = 1920 / downscale
     val baseRows = 1080 / downscale
@@ -256,28 +256,48 @@ class KapeLuz : JPanel() {
 
     // Domyślny renderer gracza (obecna logika)
     var playerRenderer: PlayerRenderer = object : PlayerRenderer {
-        private var skinTexture: BufferedImage? = null
-        private var textureLoaded = false
+        // Change: Use a ConcurrentHashMap to cache textures per skinId
+        private val skinTextureCache = ConcurrentHashMap<String, BufferedImage>()
 
-        private fun loadTexture() {
-            if (textureLoaded) return
+        private fun loadTexture(skinId: String): BufferedImage? {
+            // Check cache first
+            skinTextureCache[skinId]?.let { return it }
+
+            val texturePath = if (skinId == "default") {
+                "/textures/default.png"
+            } else {
+                // Assuming skinId is the player's net ID as a string
+                "/textures/$skinId.png"
+            }
+
             try {
-                val stream = javaClass.getResourceAsStream("/textures/default.png")
+                val stream = javaClass.getResourceAsStream(texturePath)
                 if (stream != null) {
-                    skinTexture = ImageIO.read(stream)
-                    println("Skin texture loaded successfully.")
+                    val texture = ImageIO.read(stream)
+                    println("Skin texture '$skinId' loaded successfully from $texturePath.")
+                    skinTextureCache[skinId] = texture
+                    return texture
                 } else {
-                    println("Skin texture not found at /textures/default.png")
+                    println("Skin texture '$skinId' not found at $texturePath. Falling back to default.")
+                    // If a specific skin is not found, try loading the default.
+                    // This prevents repeated attempts to load non-existent skins.
+                    if (skinId != "default") {
+                        return loadTexture("default") // Recursive call for default
+                    }
                 }
             } catch (e: Exception) {
-                println("Failed to load skin texture: ${e.message}")
+                println("Failed to load skin texture '$skinId' from $texturePath: ${e.message}. Falling back to default.")
+                if (skinId != "default") {
+                    return loadTexture("default") // Recursive call for default
+                }
             }
-            textureLoaded = true
+            return null // Default texture also failed or was already tried
         }
 
         override fun render(game: KapeLuz, player: RemotePlayer) {
-            loadTexture()
-            val tex = skinTexture
+            val skinId = player.skinId // Get the skinId from the player object
+            val tex = loadTexture(skinId)
+
             if (tex == null) {
                 game.renderPlayerModelInternal(player) // Fallback do kolorów
                 return
@@ -584,6 +604,7 @@ class KapeLuz : JPanel() {
     private val playerNetIds = ConcurrentHashMap<String, Byte>()
     private var nextNetId: Byte = 2 // Host=1, Start clients from 2
 
+    var myNetId: Byte = 0 // Przypisane ID sieciowe gracza (ustawiane przez Host/Serwer)
     var myPlayerId: String = "" // Unikalne ID sesji (otrzymane od serwera)
     var isHost = false // Flaga określająca rolę w sieci
     var isMultiplayerClient = false // Flaga dla klienta, aby blokować generowanie świata
@@ -608,6 +629,7 @@ class KapeLuz : JPanel() {
     // Kolejka akcji z wątku sieciowego do wykonania na głównym wątku gry
     private val networkActionQueue = ConcurrentLinkedQueue<() -> Unit>()
 
+    private var hasSentPlayerInfo = false
     // Timer do wysyłania listy graczy i keep-alive
     private var lastPlayerListBroadcast = 0L
     private var lastKeepAliveSent = 0L
@@ -1286,6 +1308,7 @@ class KapeLuz : JPanel() {
         isHost = false
         isMultiplayerClient = false
         isDisconnectingIntentional = false // Reset flagi przy restarcie gry
+        hasSentPlayerInfo = false
         roomCodeComponent?.text = "" // Reset kodu przy restarcie
     }
 
@@ -1560,6 +1583,13 @@ class KapeLuz : JPanel() {
                     networkActionQueue.add {
                         val bufferCopy = ByteBuffer.wrap(dataCopy)
                         if (bufferCopy.remaining() == 0) return@add
+                        // Jeśli jesteśmy klientem i jeszcze nie wysłaliśmy nicku, robimy to teraz, 
+                        // bo wiemy, że połączenie działa (właśnie coś odebraliśmy).
+                        if (!isHost && !hasSentPlayerInfo) {
+                            println("Client: Connection confirmed. Sending playerName: $playerName to host.")
+                            peerConnections[targetId]?.sendData(NetworkProtocol.encodePlayerInfo(playerName))
+                            hasSentPlayerInfo = true
+                        }
 
                         val type = bufferCopy.get(0) // Podgląd typu pakietu
                         when (type) {
@@ -1574,7 +1604,7 @@ class KapeLuz : JPanel() {
                                         val player = remotePlayers.getOrPut(netId) {
                                             println("Nowy gracz ($netId) pojawił się na hoście.")
                                             // Inicjalizujemy z domyślną pozycją i wymiarem, zostaną natychmiast nadpisane
-                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, 0L, 0L, "overworld", false, 0.0)
+                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, 0L, 0L, "overworld", false, 0.0, netId.toString(), "Gracz $netId")
                                         }
                                         player.apply {
                                             x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch; bodyYaw = data.bodyYaw
@@ -1607,12 +1637,35 @@ class KapeLuz : JPanel() {
                                     }
                                 } else {
                                     // Klient: Otrzymuje pakiet od Hosta z poprawnym ID
-                                    // Ignorujemy własne ID (jeśli relay wrócił)
-                                    if (data.playerId != myPlayerId.toByteOrNull()) {
+                                    if (data.playerId != myNetId) {
                                         remotePlayers.getOrPut(data.playerId) {
                                             // Gracz pojawił się między aktualizacjami listy graczy
-                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0)
+                                            val sid = if (data.playerId == 1.toByte()) "default" else data.playerId.toString()
+                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, skinId = sid, playerName = "Gracz ${data.playerId}") // Placeholder playerName
                                         }.apply { x = data.x; y = data.y; z = data.z; yaw = data.yaw; pitch = data.pitch; bodyYaw = data.bodyYaw; lastUpdate = System.currentTimeMillis() }
+                                    }
+                                }
+                            }
+                            NetworkProtocol.PACKET_PLAYER_INFO -> {
+                                if (isHost) {
+                                    val data = NetworkProtocol.decodePlayerInfo(bufferCopy)
+                                    val netId = playerNetIds[targetId]
+                                    if (netId != null) {
+                                        remotePlayers[netId]?.playerName = data.playerName
+                                        // Upewniamy się, że obiekt RemotePlayer istnieje i jego nazwa jest ustawiona/zaktualizowana
+                                        val player = remotePlayers.getOrPut(netId) {
+                                            println("Host: Tworzenie RemotePlayer dla NetID $netId z nazwą '${data.playerName}' z PACKET_PLAYER_INFO.")
+                                            // Inicjalizujemy z wartościami domyślnymi, ale używamy poprawnej nazwy gracza
+                                            RemotePlayer(0.0, 0.0, 0.0, 0.0, 0.0, 0L, 0L, "overworld", false, 0.0, netId.toString(), data.playerName)
+                                        }
+                                        // Jeśli obiekt już istniał, aktualizujemy jego nazwę
+                                        if (player.playerName != data.playerName) {
+                                            println("Host: Aktualizacja nazwy RemotePlayer dla NetID $netId z '${player.playerName}' na '${data.playerName}'.")
+                                            player.playerName = data.playerName
+                                        }
+                                        println("Host received player info for $targetId: ${data.playerName}")
+                                        // Broadcast updated player list immediately so others see the name
+                                        broadcastPlayerList()
                                     }
                                 }
                             }
@@ -1698,7 +1751,7 @@ class KapeLuz : JPanel() {
                                     }
                                 } else {
                                     // Client receives dimension update of another player
-                                    if (data.playerId != myPlayerId.toByteOrNull()) {
+                                    if (data.playerId != myNetId) {
                                         remotePlayers[data.playerId]?.dimension = data.dimension
                                     }
                                 }
@@ -1832,6 +1885,7 @@ class KapeLuz : JPanel() {
                             NetworkProtocol.PACKET_WORLD_DATA -> {
                                 // Proste wywołanie - cała logika jest teraz w NetworkProtocol
                                 NetworkProtocol.decodeWorldData(bufferCopy, this@KapeLuz)
+                                // Zakładamy, że decodeWorldData ustawia myNetId w obiekcie KapeLuz
                             }
                             NetworkProtocol.PACKET_CHUNK_REQUEST -> {
                                 if (isHost) {
@@ -1864,21 +1918,21 @@ class KapeLuz : JPanel() {
                                 // Tylko klient odbiera listę
                                 if (!isHost) {
                                     val newList = NetworkProtocol.decodePlayerList(bufferCopy)
-                                    // Synchronizacja: Usuwamy graczy, których nie ma w nowej liście (oprócz siebie)
-                                    val myByteId = myPlayerId.toByteOrNull() ?: 0
 
-                                    // Usuwamy tych, których nie ma w nowej liście
-                                    remotePlayers.keys.retainAll(newList.keys)
+                                    // FIX: Filtrujemy nową listę tak, aby nie zawierała nas samych
+                                    val filteredKeys = newList.keys.toMutableSet()
+                                    if (myNetId != 0.toByte()) filteredKeys.remove(myNetId)
+
+                                    // Usuwamy z pamięci tych, których nie ma w (przefiltrowanej) liście
+                                    remotePlayers.keys.retainAll(filteredKeys)
 
                                     // Aktualizujemy/Dodajemy nowych
                                     newList.forEach { (id, p) ->
-                                        if (id != myByteId) {
+                                        if (id != myNetId && id != 0.toByte()) {
+                                            // Wymuszamy poprawne skinId na podstawie ID (Host to zawsze default)
+                                            p.skinId = if (id == 1.toByte()) "default" else id.toString()
                                             remotePlayers[id] = p
                                         }
-                                    }
-                                    // FIX: Upewniamy się, że nie mamy siebie na liście (usuwamy ducha)
-                                    if (myByteId != 0.toByte()) {
-                                        remotePlayers.remove(myByteId)
                                     }
                                 }
                             }
@@ -4647,7 +4701,7 @@ class KapeLuz : JPanel() {
             // Budujemy listę wszystkich graczy (Host + Klienci)
             val allPlayers = HashMap<Byte, RemotePlayer>()
             // Dodaj Hosta (ID 1)
-            allPlayers[1] = RemotePlayer(camX, camY, camZ, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), localDimension, false, myBodyYaw)
+            allPlayers[1] = RemotePlayer(camX, camY, camZ, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), localDimension, false, myBodyYaw, "default", playerName) // Host uses default skin and its own playerName
             // Dodaj Klientów
             allPlayers.putAll(remotePlayers)
 
@@ -6697,7 +6751,13 @@ class KapeLuz : JPanel() {
                     println("gameFrozen: $gameFrozen")
                 }
                 if (keyCode == KeyEvent.VK_G) {
-                    println("camX: ${(floor((camX + (cubeSize/2))/2)).toSmartString()}, camY: ${(floor((camY + (cubeSize/2))/2)+5).toSmartString()}, camZ: ${(floor((camZ + (cubeSize/2))/2)).toSmartString()}, yaw: ${yaw.toSmartString()}, pitch: ${pitch.toSmartString()}, speed: $currentSpeed")
+                    println("camX: ${(floor((camX + (cubeSize/2))/2)).toSmartString()}, " +
+                            "camY: ${(floor((camY + (cubeSize/2))/2)+5).toSmartString()}, " +
+                            "camZ: ${(floor((camZ + (cubeSize/2))/2)).toSmartString()}, " +
+                            "yaw: ${yaw.toSmartString()}, " +
+                            "pitch: ${pitch.toSmartString()}, " +
+                            "speed: $currentSpeed, " +
+                            "name: $playerName")
                 }
                 if (keyCode >= KeyEvent.VK_1 && keyCode <= KeyEvent.VK_9) {
                     selectedSlot = keyCode - KeyEvent.VK_1
@@ -7081,12 +7141,20 @@ class KapeLuz : JPanel() {
 }
 
 fun main(args: Array<String>) {
+    // Pobieramy nick z pierwszego parametru, jeśli istnieje.
+    val nickFromArgs = if (args.isNotEmpty()) {
+        args[0]
+    } else {
+        val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
+        (1..5).map { allowedChars.random() }.joinToString("")
+    }
+
     SwingUtilities.invokeLater {
         val frame = JFrame("KapeLuz")
         frame.iconImage = Toolkit.getDefaultToolkit().getImage(KapeLuz::class.java.getResource("/icons/KapeLuz.png"))
         frame.defaultCloseOperation = JFrame.EXIT_ON_CLOSE
         frame.isResizable = true
-        frame.add(KapeLuz())
+        frame.add(KapeLuz(nickFromArgs))
         frame.pack()
         frame.setLocationRelativeTo(null)
         frame.isVisible = true

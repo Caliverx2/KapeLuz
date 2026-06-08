@@ -25,6 +25,7 @@ object NetworkProtocol {
     const val PACKET_ENTITY_DESTROY: Byte = 0x0D
     const val PACKET_DROP_ITEM_REQUEST: Byte = 0x0E
     const val PACKET_ADD_ITEM: Byte = 0x0F
+    const val PACKET_PLAYER_INFO: Byte = 0x10 // Nowy pakiet do przesyłania nazwy gracza
 
     // --- HELPERY (Dla wygody) ---
     fun ByteBuffer.putBool(value: Boolean) = this.put(if (value) 1.toByte() else 0.toByte())
@@ -66,7 +67,7 @@ object NetworkProtocol {
     fun decodeWorldData(buffer: ByteBuffer, game: KapeLuz) {
         buffer.get() // Skip header
 
-        val newSeed = buffer.int
+        val newSeed = buffer.int // Seed
         if (game.seed != newSeed) {
             game.seed = newSeed
         }
@@ -76,8 +77,8 @@ object NetworkProtocol {
 
         game.dayCounter = buffer.int
 
-        val assignedId = if (buffer.hasRemaining()) buffer.get() else 0
-        if (assignedId != 0.toByte()) game.myPlayerId = assignedId.toString()
+        game.myNetId = if (buffer.hasRemaining()) buffer.get() else 0 // Assign myNetId
+        if (game.myNetId != 0.toByte()) game.myPlayerId = game.myNetId.toString() // Set myPlayerId from myNetId
 
         game.gameFrozen = if (buffer.hasRemaining()) buffer.getBool() else false
 
@@ -279,12 +280,13 @@ object NetworkProtocol {
     /**
      * Pakuje listę graczy: [Header][Count][ID, X, Y, Z, Yaw, Pitch, DimensionString]...
      */
-    fun encodePlayerList(players: Map<Byte, RemotePlayer>): ByteBuffer {
+    fun encodePlayerList(players: Map<Byte, RemotePlayer>): ByteBuffer { // Dodano playerName
         // Obliczamy rozmiar bufora dynamicznie
         var size = 2 // Header + Count
         players.forEach { (_, p) ->
             size += 16 // ID + Pos + Rot + BodyYaw
             size += 4 + p.dimension.toByteArray(Charsets.UTF_8).size // Length + String bytes
+            size += 4 + p.playerName.toByteArray(Charsets.UTF_8).size // Length + PlayerName String bytes
         }
 
         val buffer = ByteBuffer.allocate(size)
@@ -311,6 +313,10 @@ object NetworkProtocol {
             val dimBytes = p.dimension.toByteArray(Charsets.UTF_8)
             buffer.putInt(dimBytes.size)
             buffer.put(dimBytes)
+
+            val nameBytes = p.playerName.toByteArray(Charsets.UTF_8)
+            buffer.putInt(nameBytes.size)
+            buffer.put(nameBytes)
         }
         buffer.flip()
         return buffer
@@ -382,6 +388,19 @@ object NetworkProtocol {
         return buffer
     }
 
+    /**
+     * Pakuje nazwę gracza.
+     */
+    fun encodePlayerInfo(playerName: String): ByteBuffer {
+        val nameBytes = playerName.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocate(1 + 4 + nameBytes.size) // Header + Length + String
+        buffer.put(PACKET_PLAYER_INFO)
+        buffer.putInt(nameBytes.size)
+        buffer.put(nameBytes)
+        buffer.flip()
+        return buffer
+    }
+
     // --- DEKODERY ---
 
     data class DecodedEntitySpawn(val id: Int, val x: Double, val y: Double, val z: Double, val velX: Double, val velY: Double, val velZ: Double, val color: Int, val count: Int, val dimension: String)
@@ -389,6 +408,7 @@ object NetworkProtocol {
     data class DecodedDropRequest(val color: Int, val count: Int)
     data class DecodedAddItem(val color: Int, val count: Int)
 
+    data class DecodedPlayerInfo(val playerName: String)
     fun decodeEntitySpawn(buffer: ByteBuffer): DecodedEntitySpawn {
         buffer.get() // Header
         val id = buffer.int
@@ -423,6 +443,15 @@ object NetworkProtocol {
         val color = buffer.int
         val count = buffer.int
         return DecodedAddItem(color, count)
+    }
+
+    fun decodePlayerInfo(buffer: ByteBuffer): DecodedPlayerInfo {
+        buffer.get() // Skip header
+        val nameLen = buffer.int
+        val nameBytes = ByteArray(nameLen)
+        buffer.get(nameBytes)
+        val playerName = String(nameBytes, Charsets.UTF_8)
+        return DecodedPlayerInfo(playerName)
     }
 
     fun encodeSimpleSignal(type: Byte): ByteBuffer {
@@ -582,7 +611,12 @@ object NetworkProtocol {
             buffer.get(dimBytes)
             val dimension = String(dimBytes, Charsets.UTF_8)
 
-            map[id] = RemotePlayer(x, y, z, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), dimension, false, bodyYaw)
+            val nameLen = buffer.int
+            val nameBytes = ByteArray(nameLen)
+            buffer.get(nameBytes)
+            val playerName = String(nameBytes, Charsets.UTF_8)
+
+            map[id] = RemotePlayer(x, y, z, yaw, pitch, System.currentTimeMillis(), System.currentTimeMillis(), dimension, false, bodyYaw, "default", playerName)
         }
         return map
     }

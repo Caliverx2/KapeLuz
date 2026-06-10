@@ -163,7 +163,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             val isCrouching = !debugFly && !debugNoclip && inputManager.isKeyDown(KeyEvent.VK_SHIFT)
             return camY - (if (isCrouching) 0.2 * cubeSize else 0.0)
         }
-    var renderDistance = 5
+    var renderDistance = 7
     var debugChunkRenderDistance = 1
     var simulationDistance = 1
     var speed = 0.3
@@ -447,7 +447,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     // Mapa przechowująca maskę bitową okluzji dla każdego segmentu (index 0-63)
     // Bity: 1=West(X-), 2=East(X+), 4=Down(Y-), 8=Up(Y+), 16=North(Z-), 32=South(Z+)
     val chunkOcclusion = ConcurrentHashMap<Point, ByteArray>()
-    val chunkMeshes = ConcurrentHashMap<Point, Array<MutableList<Triangle3d>>>()
+    val chunkMeshes = ConcurrentHashMap<Point, Array<MutableList<Triangle3d>?>>()
 
     val FACE_WEST = 1
     val FACE_EAST = 2
@@ -479,7 +479,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     private var cachedBfsOcclusionMinCz: Int = 0
 
     // Cache dla meshy segmentów w promieniu renderDistance
-    private var cachedBfsMeshes: Array<Array<Array<MutableList<Triangle3d>>?>?>? = null
+    private var cachedBfsMeshes: Array<Array<Array<MutableList<Triangle3d>?>?>?>? = null
     private var cachedBfsMeshesMinCx: Int = 0
     private var cachedBfsMeshesMinCz: Int = 0
 
@@ -549,10 +549,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     private var nextEntityId = 1
 
     // --- Threading & Optimization ---
-    // Zmiana: Zostawiamy 2 rdzenie wolne (dla renderowania i systemu) oraz ustawiamy niski priorytet
-    private val chunkExecutor = Executors.newFixedThreadPool(maxOf(1, Runtime.getRuntime().availableProcessors() - 2)) { r ->
+    // Zwiększamy pulę wątków dla IO i Generatora, aby pliki czytały się równolegle
+    private val nCores = Runtime.getRuntime().availableProcessors()
+    private val chunkExecutor = Executors.newFixedThreadPool(maxOf(2, nCores - 2)) { r ->
         val t = Thread(r)
-        t.priority = Thread.MIN_PRIORITY // Najniższy priorytet - renderowanie jest ważniejsze!
+        t.name = "World-Loader"
+        t.priority = Thread.NORM_PRIORITY // Loader musi mieć siłę, by dostarczać dane
         t.isDaemon = true
         t
     }
@@ -571,12 +573,13 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     // --- Refresh Queue System ---
     // Zmiana na ThreadPoolExecutor z kolejką priorytetową
     private val refreshExecutor = ThreadPoolExecutor(
-        1, 1, // core and max pool size
-        0L, TimeUnit.MILLISECONDS, // keepAliveTime
+        maxOf(2, nCores / 2), // Wykorzystujemy połowę rdzeni do meshowania
+        maxOf(2, nCores / 2), 
+        60L, TimeUnit.SECONDS,
         PriorityBlockingQueue<Runnable>(), // Używamy kolejki priorytetowej
         { r -> // ThreadFactory
             val t = Thread(r, "Chunk-Refresher")
-            t.priority = Thread.MIN_PRIORITY
+            t.priority = Thread.NORM_PRIORITY - 1 // Nieco niższy niż loader, by nie dławić IO
             t.isDaemon = true
             t
         }
@@ -1854,6 +1857,10 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                                     for (b in data.blocks) if (b != 0) { chunk.hasBlocks = true; break }
                                 }
 
+                            // Wstępne oświetlenie sekcji, aby nie była czarna do czasu pełnego odświeżenia
+                            val l = calculateLighting(chunk)
+                            System.arraycopy(l, 0, chunk.light, 0, l.size)
+
                                 // Odświeżamy mesh (można to zoptymalizować, ale na razie odświeżamy cały chunk)
                                 chunkExecutor.submit {
                                     try {
@@ -1872,6 +1879,10 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
                                 // Sprawdzamy czy chunk ma bloki
                                 for (b in data.blocks) if (b != 0) { newChunk.hasBlocks = true; break }
+
+                                // Wstępne oświetlenie przed upublicznieniem chunka
+                                val l = calculateLighting(newChunk)
+                                System.arraycopy(l, 0, newChunk.light, 0, l.size)
 
                                 chunks[p] = newChunk
                                 chunkExecutor.submit {
@@ -2036,20 +2047,24 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
             // 1. Czyszczenie starych żądań (dla chunków, które wyszły poza zasięg)
             // Zapobiega to wyciekowi pamięci i blokowaniu limitu żądań przez stare chunki
-            val requestIterator = clientChunkRequests.iterator()
-            while (requestIterator.hasNext()) {
-                val entry = requestIterator.next()
+            // 1. Czyszczenie starych żądań - teraz wyśrodkowane na pozycji gracza
+            clientChunkRequests.entries.removeIf { entry ->
                 val p = entry.key
-                if (abs(p.x - currentChunkX) > renderDistance + 2 || abs(p.y - currentChunkZ) > renderDistance + 2) {
-                    requestIterator.remove()
-                }
+                val dx = (p.x * 32.0 + 16.0) - camX
+                val dz = (p.y * 32.0 + 16.0) - camZ
+                abs(dx) > (renderDistance + 2) * 32.0 || abs(dz) > (renderDistance + 2) * 32.0
             }
 
             val missingChunks = ArrayList<Point>()
 
             // Skanujemy obszar renderowania
-            for (cx in currentChunkX - renderDistance..currentChunkX + renderDistance) {
-                for (cz in currentChunkZ - renderDistance..currentChunkZ + renderDistance) {
+            val minCX = floor((camX - renderDistance * 32.0) / 32.0).toInt()
+            val maxCX = floor((camX + renderDistance * 32.0) / 32.0).toInt()
+            val minCZ = floor((camZ - renderDistance * 32.0) / 32.0).toInt()
+            val maxCZ = floor((camZ + renderDistance * 32.0) / 32.0).toInt()
+
+            for (cx in minCX..maxCX) {
+                for (cz in minCZ..maxCZ) {
                     val p = Point(cx, cz)
                     if (!chunks.containsKey(p)) {
                         missingChunks.add(p)
@@ -2096,31 +2111,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             }
 
             // FIX: "Leczenie" niewidzialnych chunków.
-            // Jeśli chunk jest w pamięci (odebrany), ale nie ma mesha (bo np. przyszedł gdy był poza zasięgiem),
-            // wymuszamy jego odświeżenie.
-            if (gameTicks % 5 == 0L) { // Zwiększono częstotliwość: co 5 ticków (ok. 6 razy/sek)
-                var fixedThisFrame = 0
-                val maxFixesPerFrame = 5 // Limit napraw na klatkę, aby nie zaciąć gry
-
-                for (cx in currentChunkX - renderDistance..currentChunkX + renderDistance) {
-                    for (cz in currentChunkZ - renderDistance..currentChunkZ + renderDistance) {
-                        val p = Point(cx, cz)
-                        val chunk = chunks[p]
-                        // Sprawdzamy czy chunk istnieje i ma bloki (nie jest pustym powietrzem)
-                        if (chunk != null && chunk.hasBlocks) {
-                            val mesh = chunkMeshes[p]
-                            // Jeśli nie ma mesha LUB mesh jest pusty, a chunk ma bloki -> wymuś generowanie
-                            if (mesh == null || mesh.all { it.isEmpty() }) {
-                                // Wywołujemy bezpośrednio - funkcja jest już asynchroniczna i sama zarządza kolejką.
-                                refreshChunkData(cx, cz, isHighPriority = true)
-                                fixedThisFrame++
-                                if (fixedThisFrame >= maxFixesPerFrame) break
-                            }
-                        }
-                    }
-                    if (fixedThisFrame >= maxFixesPerFrame) break
-                }
-            }
+            healGhostChunks(currentChunkX, currentChunkZ)
 
             // --- CLIENT-SIDE CHUNK UNLOADING ---
             // Uruchamiamy co 60 ticków (ok. 2 sekundy), aby nie obciążać pętli gry.
@@ -2129,7 +2120,10 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                 val chunkIterator = chunks.keys.iterator()
                 while (chunkIterator.hasNext()) {
                     val p = chunkIterator.next()
-                    if (abs(p.x - currentChunkX) > safeZone || abs(p.y - currentChunkZ) > safeZone) {
+                    val dx = (p.x * 32.0 + 16.0) - camX
+                    val dz = (p.y * 32.0 + 16.0) - camZ
+                    // Usuwamy chunki, które są poza bezpieczną strefą (w jednostkach świata)
+                    if (abs(dx) > safeZone * 32.0 || abs(dz) > safeZone * 32.0) {
                         chunkIterator.remove()
                         chunkMeshes.remove(p)
                         chunkOcclusion.remove(p)
@@ -2140,38 +2134,17 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             return // Klient nie generuje sam
         }
 
-        // --- HOST/SINGLEPLAYER: "Leczenie" niewidzialnych chunków ---
-        // Jeśli chunk jest w pamięci, ale nie ma mesha (np. z powodu race condition przy ładowaniu),
-        // wymuszamy jego odświeżenie. Działa to jako solidne zabezpieczenie.
-        if (gameTicks % 10 == 0L) { // Uruchamiamy co 10 ticków (ok. 3 razy/sek)
-            var fixedThisTick = 0
-            val maxFixesPerTick = 10 // Limit napraw na tick, aby nie obciążać systemu
+        healGhostChunks(currentChunkX, currentChunkZ)
 
-            // Iterujemy po załadowanych chunkach, które są w zasięgu wzroku
-            for (cx in currentChunkX - renderDistance..currentChunkX + renderDistance) {
-                for (cz in currentChunkZ - renderDistance..currentChunkZ + renderDistance) {
-                    val p = Point(cx, cz)
-                    val chunk = chunks[p]
+        // 1. Zlecanie generowania chunków - obliczamy granice na podstawie współrzędnych świata
+        val minCX_host = floor((camX - renderDistance * 32.0) / 32.0).toInt()
+        val maxCX_host = floor((camX + renderDistance * 32.0) / 32.0).toInt()
+        val minCZ_host = floor((camZ - renderDistance * 32.0) / 32.0).toInt()
+        val maxCZ_host = floor((camZ + renderDistance * 32.0) / 32.0).toInt()
 
-                    // Sprawdzamy czy chunk istnieje i ma bloki (nie jest pustym powietrzem)
-                    if (chunk != null && chunk.hasBlocks) {
-                        val mesh = chunkMeshes[p]
-                        // Jeśli nie ma mesha LUB mesh jest pusty, a chunk ma bloki -> wymuś generowanie
-                        if (mesh == null || mesh.all { it.isEmpty() }) {
-                            refreshChunkData(cx, cz, isHighPriority = true)
-                            fixedThisTick++
-                            if (fixedThisTick >= maxFixesPerTick) break
-                        }
-                    }
-                }
-                if (fixedThisTick >= maxFixesPerTick) break
-            }
-        }
-
-        // 1. Zlecanie generowania chunków w tle (od środka na zewnątrz)
         val chunksToLoad = java.util.ArrayList<Point>()
-        for (cx in currentChunkX - renderDistance..currentChunkX + renderDistance) {
-            for (cz in currentChunkZ - renderDistance..currentChunkZ + renderDistance) {
+        for (cx in minCX_host..maxCX_host) {
+            for (cz in minCZ_host..maxCZ_host) {
                 if (cx > maxChunkCoord || cx < minChunkCoord || cz > maxChunkCoord || cz < minChunkCoord) continue
                 val p = Point(cx, cz)
                 if (!chunks.containsKey(p) && !chunksBeingGenerated.contains(p)) {
@@ -2189,7 +2162,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
         var chunksSubmitted = 0
         for (p in chunksToLoad) {
-            if (chunksSubmitted >= 2) break // Zwiększono limit bezpiecznie dzięki priorytetom wątków
+            if (chunksSubmitted >= 12) break // Znacznie agresywniejsze ładowanie (z 2 na 12)
             chunksBeingGenerated.add(p)
             chunkExecutor.submit {
                 try {
@@ -2198,6 +2171,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     // (Wymagałoby iteracji, ale generator zwykle zwraca niepusty teren).
                     // Zakładamy, że generator terenu zawsze coś tworzy (np. bedrock), więc hasBlocks=true.
                     newChunk.hasBlocks = true
+                    
+                    // PRE-LIGHT: Obliczamy oświetlenie ZANIM dodamy chunk do mapy.
+                    // To całkowicie eliminuje efekt "czarnych chunków" po załadowaniu.
+                    val l = calculateLighting(newChunk)
+                    System.arraycopy(l, 0, newChunk.light, 0, l.size)
+                    
                     chunks[p] = newChunk
 
                     // --- LOAD ENTITIES ---
@@ -2229,7 +2208,11 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     // refreshChunkData zajmie się nowym chunkiem ORAZ jego sąsiadami,
                     // zapewniając poprawne oświetlenie i usunięcie "szwów".
                     // Ta funkcja jest kosztowna, ale już jest w wątku tła, więc nie powoduje lagów.
-                    refreshChunkData(p.x, p.y)
+                    
+                    // Priorytetyzujemy chunki blisko gracza
+                    val distSq = (p.x - currentChunkX) * (p.x - currentChunkX) + (p.y - currentChunkZ) * (p.y - currentChunkZ)
+                    val highPriority = distSq <= 4
+                    refreshChunkData(p.x, p.y, isHighPriority = highPriority)
 
                 } finally {
                     chunksBeingGenerated.remove(p)
@@ -2244,17 +2227,19 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         }
 
         // Zmiana: Usuwanie starych chunków i ich meshy (Garbage Collection logiczny)
-        val safeZone = renderDistance + 2
+        val safeZoneUnits = (renderDistance + 2) * 32.0
         val toRemove = chunks.keys.filter { p ->
             // 1. Sprawdź dystans do Hosta (kamery lokalnej)
-            if (abs(p.x - currentChunkX) <= safeZone && abs(p.y - currentChunkZ) <= safeZone) return@filter false
+            val dx = (p.x * 32.0 + 16.0) - camX
+            val dz = (p.y * 32.0 + 16.0) - camZ
+            if (abs(dx) <= safeZoneUnits && abs(dz) <= safeZoneUnits) return@filter false
 
             // 2. FIX: Sprawdź dystans do WSZYSTKICH klientów.
             // Nie usuwamy chunka, jeśli jakikolwiek gracz go widzi.
             for (player in remotePlayers.values) {
-                val pcx = floor(player.x / 32.0).toInt()
-                val pcz = floor(player.z / 32.0).toInt()
-                if (abs(p.x - pcx) <= safeZone && abs(p.y - pcz) <= safeZone) return@filter false
+                val pdx = (p.x * 32.0 + 16.0) - player.x
+                val pdz = (p.y * 32.0 + 16.0) - player.z
+                if (abs(pdx) <= safeZoneUnits && abs(pdz) <= safeZoneUnits) return@filter false
             }
             true // Chunk jest daleko od wszystkich -> do usunięcia
         }
@@ -2284,12 +2269,34 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         }
     }
 
+    private fun healGhostChunks(ccX: Int, ccZ: Int) {
+        if (gameTicks % 10 != 0L) return
+        var fixed = 0
+        for (cx in ccX - renderDistance..ccX + renderDistance) {
+            for (cz in ccZ - renderDistance..ccZ + renderDistance) {
+                val p = Point(cx, cz)
+                val chunk = chunks[p] ?: continue
+                if (!chunk.hasBlocks) continue
+                
+                val mesh = chunkMeshes[p]
+                val occlusion = chunkOcclusion[p]
+                
+                // Jeśli brakuje mesha LUB danych okluzji dla załadowanego chunka -> napraw go
+                if (mesh == null || occlusion == null) {
+                    refreshChunkData(cx, cz, isHighPriority = true)
+                    fixed++
+                    if (fixed > 8) return
+                }
+            }
+        }
+    }
+
     // Dodano parametr changedBlocks dla operacji masowych (np. płyny)
     fun refreshChunkData(cx: Int, cz: Int, lx: Int = -1, lz: Int = -1, changedBlocks: List<BlockPos>? = null, isHighPriority: Boolean = false) {
-        // OPTYMALIZACJA: Nie aktualizuj chunków, które są poza zasięgiem wzroku.
+        // Margines +2, aby załadować oświetlenie zanim gracz tam wejdzie
         val currentChunkX = floor(camX / 32.0).toInt()
         val currentChunkZ = floor(camZ / 32.0).toInt()
-        if (abs(cx - currentChunkX) > renderDistance + 3 || abs(cz - currentChunkZ) > renderDistance + 3) return
+        if (abs(cx - currentChunkX) > renderDistance + 2 || abs(cz - currentChunkZ) > renderDistance + 2) return
 
         val key = Point(cx, cz)
 
@@ -2325,48 +2332,57 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
     // Stara logika przeniesiona do metody prywatnej, wykonywanej w tle
     private fun performChunkRefreshSync(cx: Int, cz: Int, lx: Int, lz: Int, changedBlocks: List<BlockPos>?) {
-        // Ponowne sprawdzenie dystansu wewnątrz wątku (na wypadek gdyby gracz uciekł daleko zanim zadanie się wykonało)
         val currentChunkX = floor(camX / 32.0).toInt()
         val currentChunkZ = floor(camZ / 32.0).toInt()
         if (abs(cx - currentChunkX) > renderDistance + 4 || abs(cz - currentChunkZ) > renderDistance + 4) return
 
-        val chunksToUpdate = java.util.HashSet<Point>()
-        chunksToUpdate.add(Point(cx, cz))
+        val centerPoint = Point(cx, cz)
+        val centerChunk = chunks[centerPoint] ?: return
 
-        chunksToUpdate.add(Point(cx - 1, cz))
-        chunksToUpdate.add(Point(cx + 1, cz))
-        chunksToUpdate.add(Point(cx, cz - 1))
-        chunksToUpdate.add(Point(cx, cz + 1))
-
-        fun checkDiagonals(checkLx: Int, checkLz: Int) {
-            if (checkLx + checkLz <= 15) chunksToUpdate.add(Point(cx - 1, cz - 1))
-            if ((15 - checkLx) + checkLz <= 15) chunksToUpdate.add(Point(cx + 1, cz - 1))
-            if (checkLx + (15 - checkLz) <= 15) chunksToUpdate.add(Point(cx - 1, cz + 1))
-            if ((15 - checkLx) + (15 - checkLz) <= 15) chunksToUpdate.add(Point(cx + 1, cz + 1))
-        }
-
-        if (changedBlocks != null) {
-            for (pos in changedBlocks) {
-                checkDiagonals(pos.x, pos.z)
+        // Pobieramy obszar 3x3 do pełnej propagacji światła
+        val area = mutableListOf<Chunk>()
+        val areaPoints = mutableSetOf<Point>()
+        for (dx in -1..1) {
+            for (dz in -1..1) {
+                val p = Point(cx + dx, cz + dz)
+                chunks[p]?.let { 
+                    area.add(it)
+                    areaPoints.add(p)
+                }
             }
-        } else if (lx != -1 && lz != -1) {
-            checkDiagonals(lx, lz)
-        } else {
-            chunksToUpdate.add(Point(cx - 1, cz - 1))
-            chunksToUpdate.add(Point(cx + 1, cz - 1))
-            chunksToUpdate.add(Point(cx - 1, cz + 1))
-            chunksToUpdate.add(Point(cx + 1, cz + 1))
         }
 
-        chunksToUpdate.forEach { p -> chunks[p]?.let { Arrays.fill(it.light, 0.toByte()) } }
+        if (area.isEmpty()) return
 
-        repeat(3) {
-            chunksToUpdate.forEach { p -> chunks[p]?.let { calculateLighting(it) } } // Powtarzamy tylko raz, jeśli BFS jest poprawny
+        // 1. OŚWIETLENIE - Obliczamy wszystko w buforach tymczasowych (workingLights)
+        // Dzięki temu renderer nigdy nie zobaczy "czarnego" stanu pośredniego.
+        val workingLights = mutableMapOf<Point, ByteArray>()
+
+        repeat(3) { i ->
+            val ignore = if (i == 0) areaPoints else emptySet<Point>()
+            for (chunk in area) {
+                val pt = Point(chunk.x, chunk.z)
+                workingLights[pt] = calculateLighting(chunk, ignore, workingLights)
+            }
         }
 
-        chunksToUpdate.forEach { p -> updateChunkMesh(p.x, p.y) }
+        // ATOMOWY COMMIT: Dopiero teraz kopiujemy gotowe oświetlenie do chunków
+        workingLights.forEach { (pt, buffer) ->
+            chunks[pt]?.let { chunk ->
+                System.arraycopy(buffer, 0, chunk.light, 0, buffer.size)
+            }
+        }
+
+        // 2. MESH - Aktualizujemy meshe dla całego obszaru 3x3, aby "zszyć" krawędzie
+        for (dx in -1..1) {
+            for (dz in -1..1) {
+                updateChunkMesh(cx + dx, cz + dz)
+            }
+        }
+        
+        // 4. SIGNAL - Powiadomienie renderera o zmianach
+        visibilityGraphDirty = true
     }
-
     fun changeDimension(dim: String) {
         // FIX: Save entities before clearing chunks to prevent them from falling into void or duplicating
         val entitiesToSave = entities.filter { it.dimension == localDimension }
@@ -2448,11 +2464,9 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         return chunk
     }
 
-    private fun calculateLighting(chunk: Chunk) {
-        // Używamy tymczasowego bufora, aby uniknąć race condition (czytanie wyzerowanego światła przez inne wątki)
+    private fun calculateLighting(chunk: Chunk, ignoreNeighbors: Set<Point> = emptySet(), workingBuffers: Map<Point, ByteArray> = emptyMap()): ByteArray {
+        // Zwracamy nowy bufor zamiast modyfikować chunk bezpośrednio
         val newLight = ByteArray(chunk.width * chunk.height * chunk.depth)
-
-        // Kolejka BFS dla światła
         val lightQueue = IntArray(16 * 128 * 16 * 4) // x, y, z spakowane lub indeksy
         var qHead = 0
         var qTail = 0
@@ -2536,9 +2550,14 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
         // 2. Import światła z sąsiadów (Propagacja przez granice chunków - powietrze oświetla powietrze)
         fun importLight(nx: Int, ny: Int, nz: Int, idx: Int, neighbor: Chunk) {
-            val nVal = neighbor.getLight(nx, ny, nz)
-            val nSky = (nVal shr 4) and 0xF
-            val nBlock = nVal and 0xF
+            val nPt = Point(neighbor.x, neighbor.z)
+            // FIX: Jeśli mamy już nowsze dane oświetlenia w workingBuffers, używamy ich zamiast live data
+            val nVal = workingBuffers[nPt]?.let { 
+                it[neighbor.getIndex(nx, ny, nz)].toInt() and 0xFF 
+            } ?: neighbor.getLight(nx, ny, nz)
+
+            val nSky = (nVal shr 4) and 0xF 
+            val nBlock = nVal and 0xF 
 
             val myVal = newLight[idx].toInt() and 0xFF
             var mySky = (myVal shr 4) and 0xF
@@ -2568,19 +2587,27 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
         // West (x-1) -> Nasze x=0 czyta z x=15 sąsiada
         neighborChunks[3]?.let { neighbor -> // Indeks 3 to chunk (x-1, z)
-            for (z in 0 until 16) for (y in 0 until 128) importLight(15, y, z, chunk.getIndex(0, y, z), neighbor)
+            if (!ignoreNeighbors.contains(Point(neighbor.x, neighbor.z))) {
+                for (z in 0 until 16) for (y in 0 until 128) importLight(15, y, z, chunk.getIndex(0, y, z), neighbor)
+            }
         }
         // East (x+1) -> Nasze x=15 czyta z x=0 sąsiada
         neighborChunks[5]?.let { neighbor -> // Indeks 5 to chunk (x+1, z)
-            for (z in 0 until 16) for (y in 0 until 128) importLight(0, y, z, chunk.getIndex(15, y, z), neighbor)
+            if (!ignoreNeighbors.contains(Point(neighbor.x, neighbor.z))) {
+                for (z in 0 until 16) for (y in 0 until 128) importLight(0, y, z, chunk.getIndex(15, y, z), neighbor)
+            }
         }
         // North (z-1) -> Nasze z=0 czyta z z=15 sąsiada
         neighborChunks[1]?.let { neighbor -> // Indeks 1 to chunk (x, z-1)
-            for (x in 0 until 16) for (y in 0 until 128) importLight(x, y, 15, chunk.getIndex(x, y, 0), neighbor)
+            if (!ignoreNeighbors.contains(Point(neighbor.x, neighbor.z))) {
+                for (x in 0 until 16) for (y in 0 until 128) importLight(x, y, 15, chunk.getIndex(x, y, 0), neighbor)
+            }
         }
         // South (z+1) -> Nasze z=15 czyta z z=0 sąsiada
         neighborChunks[7]?.let { neighbor -> // Indeks 7 to chunk (x, z+1)
-            for (x in 0 until 16) for (y in 0 until 128) importLight(x, y, 0, chunk.getIndex(x, y, 15), neighbor)
+            if (!ignoreNeighbors.contains(Point(neighbor.x, neighbor.z))) {
+                for (x in 0 until 16) for (y in 0 until 128) importLight(x, y, 0, chunk.getIndex(x, y, 15), neighbor)
+            }
         }
 
         // 3. Propagacja światła (BFS)
@@ -2626,8 +2653,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             }
         }
 
-        // Kopiujemy obliczone światło do głównej tablicy chunka
-        System.arraycopy(newLight, 0, chunk.light, 0, newLight.size)
+        return newLight
     }
 
     // --- System dodawania przedmiotów (API) ---
@@ -3221,7 +3247,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
         val chunk = chunks[Point(cx, cz)] ?: return
         // 4x4x4 = 4 sekcje X * 32 sekcje Y * 4 sekcje Z = 512 sekcji
-        val sections = Array(512) { mutableListOf<Triangle3d>() }
+        val sections = arrayOfNulls<MutableList<Triangle3d>>(512)
         val blockCounts = IntArray(512) // Licznik bloków w każdym segmencie
 
         // --- LOKALNY CACHE SĄSIEDNICH CHUNKÓW DLA SZYBSZEGO DOSTĘPU ---
@@ -3314,7 +3340,10 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
                     // FIX: Mapowanie ID na kolor dla mesha
                     val color = Color(getBlockDisplayColor(rawBlock), true)
-                    val targetList = sections[index]
+
+                    fun getTargetList(): MutableList<Triangle3d> {
+                        return sections[index] ?: mutableListOf<Triangle3d>().also { sections[index] = it }
+                    }
 
                     // Obliczanie wysokości bloku (dla płynów)
                     var height = 1.0
@@ -3407,12 +3436,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     fun shouldDisableAO(nx: Int, ny: Int, nz: Int) = isFluid || fluidBlocks.contains(getRawBlockLocal(nx, ny, nz)) // Używamy lokalnego cache
 
                     // Sprawdzamy sąsiadów
-                    if (shouldRenderSide(wx, y, wz - 1)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 0, color, isFluid, height, getNeighborHeight(wx, y, wz - 1), shouldDisableAO(wx, y, wz - 1)) // Z-
-                    if (shouldRenderSide(wx, y, wz + 1)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 1, color, isFluid, height, getNeighborHeight(wx, y, wz + 1), shouldDisableAO(wx, y, wz + 1)) // Z+
-                    if (shouldRenderSide(wx - 1, y, wz)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 2, color, isFluid, height, getNeighborHeight(wx - 1, y, wz), shouldDisableAO(wx - 1, y, wz)) // X-
-                    if (shouldRenderSide(wx + 1, y, wz)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 3, color, isFluid, height, getNeighborHeight(wx + 1, y, wz), shouldDisableAO(wx + 1, y, wz)) // X+
-                    if (shouldRenderCap(wx, y + 1, wz, true)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 4, color, isFluid, height, 0.0, shouldDisableAO(wx, y + 1, wz)) // Y+
-                    if (shouldRenderCap(wx, y - 1, wz, false)) addFace(targetList, wx, y, wz, xPos, yPos, zPos, 5, color, false, height, 0.0, shouldDisableAO(wx, y - 1, wz)) // Y-
+                    if (shouldRenderSide(wx, y, wz - 1)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 0, color, isFluid, height, getNeighborHeight(wx, y, wz - 1), shouldDisableAO(wx, y, wz - 1)) // Z-
+                    if (shouldRenderSide(wx, y, wz + 1)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 1, color, isFluid, height, getNeighborHeight(wx, y, wz + 1), shouldDisableAO(wx, y, wz + 1)) // Z+
+                    if (shouldRenderSide(wx - 1, y, wz)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 2, color, isFluid, height, getNeighborHeight(wx - 1, y, wz), shouldDisableAO(wx - 1, y, wz)) // X-
+                    if (shouldRenderSide(wx + 1, y, wz)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 3, color, isFluid, height, getNeighborHeight(wx + 1, y, wz), shouldDisableAO(wx + 1, y, wz)) // X+
+                    if (shouldRenderCap(wx, y + 1, wz, true)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 4, color, isFluid, height, 0.0, shouldDisableAO(wx, y + 1, wz)) // Y+
+                    if (shouldRenderCap(wx, y - 1, wz, false)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 5, color, false, height, 0.0, shouldDisableAO(wx, y - 1, wz)) // Y-
                 }
             }
         }
@@ -4740,7 +4769,8 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
     // Nowa funkcja do inicjalizacji cache BFS
     private fun initializeBfsCache(camSecX: Int, camSecZ: Int) {
-        val maxChunkRadius = (renderDistance * 4 / 16) + 1 // Promień chunków do załadowania do cache
+        // FIX: maxChunkRadius musi odpowiadać renderDistance, aby BFS nie uderzał w puste dane cache
+        val maxChunkRadius = renderDistance + 1
         val minCx = camSecX / 4 - maxChunkRadius
         val maxCx = camSecX / 4 + maxChunkRadius
         val minCz = camSecZ / 4 - maxChunkRadius
@@ -4750,7 +4780,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         val chunkDepth = maxCz - minCz + 1
 
         cachedBfsOcclusion = Array(chunkWidth) { arrayOfNulls<ByteArray>(chunkDepth) }
-        cachedBfsMeshes = Array(chunkWidth) { arrayOfNulls<Array<MutableList<Triangle3d>>>(chunkDepth) } // 32 sekcje Y
+        cachedBfsMeshes = Array(chunkWidth) { arrayOfNulls<Array<MutableList<Triangle3d>?>>(chunkDepth) } // 32 sekcje Y
 
         cachedBfsOcclusionMinCx = minCx
         cachedBfsOcclusionMinCz = minCz
@@ -4969,7 +4999,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             if (mesh != null) {
                 val index = secY * 16 + secZ * 4 + secX
                 if (index in 0 until 512) {
-                    val sectionTriangles = mesh[index]
+                    val sectionTriangles = mesh[index] ?: continue
                     if (sectionTriangles.isNotEmpty()) {
                         // Sprawdzamy Frustum Culling (czy segment jest w kadrze kamery)
                         if (isSectionVisible(cx, secX, secY, secZ, cz)) {
@@ -5771,8 +5801,9 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         // Dodajemy mały margines (nearPlaneZ), żeby nie znikało tuż przed nosem
         if (z + radius < nearPlaneZ) return false
 
-        // 2. Czy sekcja jest za daleko? (opcjonalne, renderDistance to załatwia, ale warto mieć)
-        if (z > (renderDistance + 1) * 16 * cubeSize) return false
+        // 2. Czy sekcja jest za daleko? (Limit dystansu wyśrodkowany na graczu)
+        // Dodajemy 0.5 chunka zapasu, aby BFS zdążył przetworzyć segmenty na samej krawędzi.
+        if (z > (renderDistance + 0.5) * 32.0) return false
 
         // 3. Czy sekcja jest w stożku widzenia (FOV)?
         // Obliczamy proporcje ekranu (Aspect Ratio), bo ekran jest szerszy niż wyższy

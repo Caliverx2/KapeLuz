@@ -10,16 +10,20 @@ data class Biome(
     val surfaceColor: Int,
     val subsurfaceColor: Int,
     val baseHeight: Double,
-    val heightVariation: Double, // Jak bardzo wysokość może się różnić od baseHeight
-    val treeDensity: Double, // Gęstość drzew w biomie (0.0 - 1.0)
-    val rarityThreshold: Double = 0.0, // 0.0 = zawsze możliwy, 1.0 = ekstremalnie rzadki. Biom pojawia się tylko jeśli globalRarity > rarityThreshold
-    val sizeScaleModifier: Double = 1.0 // Modyfikator skali szumów klimatycznych/kontynentalnych dla tego biomu. >1.0 dla mniejszych, bardziej poszarpanych łat (mini-biom)
+    val heightVariation: Double,
+    val treeDensity: Double,
+    val rarityThreshold: Double = 0.0,
+    val sizeScaleModifier: Double = 1.0
 )
 
 data class CaveBiome(
     val name: String,
     val wallColor: Int,
-    val floorColor: Int
+    val floorColor: Int,
+    val minZone: Int = 0,    // 0: dół, 1: środek, 2: góra
+    val maxZone: Int = 2,
+    val rarity: Double = 0.5, // 0.0 - 1.0 (im więcej, tym częściej)
+    val scale: Double = 1.0   // 1.0 to standard, <1.0 to większe biomy
 )
 
 object Biomes {
@@ -30,17 +34,18 @@ object Biomes {
     private val SAND = Color(0xDBCE9E).rgb
     private val SNOW = Color(0xFFFFFF).rgb
     private val STONE = Color(0x8EA3A1).rgb
-    
+
     // Biomy Jaskiniowe
-    val DEFAULT_CAVE = CaveBiome("Deep Caves", STONE, STONE)
-    val LUSH_CAVE = CaveBiome("Lush Caves", Color(0x3B5905).rgb, Color(0x59A608).rgb)
-    val DRIPSTONE_CAVE = CaveBiome("Dripstone", Color(0x4D3826).rgb, Color(0x4D3826).rgb)
+    val DEFAULT_CAVE = CaveBiome("Deep Caves", STONE, STONE, 0, 2, 1.0, 1.0)
+    val LUSH_CAVE = CaveBiome("Lush Caves", Color(0x3B5905).rgb, Color(0x59A608).rgb, 1, 2, 0.4, 1.2)
+    val DRIPSTONE_CAVE = CaveBiome("Dripstone", Color(0x4D3826).rgb, Color(0x4D3826).rgb, 0, 1, 0.4, 1.0)
+    val DARK_CAVE = CaveBiome("Dark Cave", Color(0x240A34).rgb , Color(0x240A34).rgb, 0, 0, 0.6, 0.4) // Tylko dół, skala 0.4 = wielkie obszary
 
     // 10 Głównych biomów
     val SNOWY_TUNDRA = Biome("Snowy Tundra", SNOW, DIRT, 58.0, 2.0, 0.0001, rarityThreshold = 0.0)
     val SNOWY_TAIGA = Biome("Snowy Taiga", SNOW, DIRT, 62.0, 5.0, 0.02, rarityThreshold = 0.0)
-    val MOUNTAIN_MEADOW = Biome("Mountain Meadow", GRASS_COLD, DIRT, 78.0, 12.0, 0.001, rarityThreshold = 0.1) // Lekko rzadsze góry
-    val MOUNTAIN_TAIGA = Biome("Mountain Taiga", GRASS_COLD, DIRT, 82.0, 15.0, 0.025, rarityThreshold = 0.15) // Rzadsze góry
+    val MOUNTAIN_MEADOW = Biome("Mountain Meadow", GRASS_COLD, DIRT, 78.0, 12.0, 0.001, rarityThreshold = 0.1)
+    val MOUNTAIN_TAIGA = Biome("Mountain Taiga", GRASS_COLD, DIRT, 82.0, 15.0, 0.025, rarityThreshold = 0.15)
     val PLAINS = Biome("Plains", GRASS_TEMPERATE, DIRT, 57.0, 3.0, 0.0005, rarityThreshold = 0.0)
     val FOREST = Biome("Forest", GRASS_TEMPERATE, DIRT, 60.0, 6.0, 0.03, rarityThreshold = 0.0)
     val DESERT = Biome("Desert", SAND, SAND, 56.0, 2.0, 0.0, rarityThreshold = 0.0)
@@ -48,103 +53,86 @@ object Biomes {
     val BEACH = Biome("Beach", SAND, SAND, 51.0, 1.0, 0.0, rarityThreshold = 0.0)
     val OCEAN = Biome("Ocean", DIRT, DIRT, 38.0, 4.0, 0.0, rarityThreshold = 0.0)
 
-    // Przykładowe mini-biomy i rzadkie biomy
-    val MINI_FOREST = Biome("Mini Forest", GRASS_TEMPERATE, DIRT, 60.0, 5.0, 0.05, rarityThreshold = 0.4, sizeScaleModifier = 2.5) // Małe, gęste lasy, rzadsze
-    val RARE_MOUNTAIN_PEAK = Biome("Rare Mountain Peak", STONE, STONE, 95.0, 8.0, 0.0, rarityThreshold = 0.8, sizeScaleModifier = 1.5) // Bardzo rzadkie, wysokie szczyty
+    val MINI_FOREST = Biome("Mini Forest", GRASS_TEMPERATE, DIRT, 60.0, 5.0, 0.05, rarityThreshold = 0.4, sizeScaleModifier = 2.5)
+    val RARE_MOUNTAIN_PEAK = Biome("Rare Mountain Peak", STONE, STONE, 95.0, 8.0, 0.0, rarityThreshold = 0.8, sizeScaleModifier = 1.5)
 }
 
 class BiomeProvider(val seed: Int) {
     private val temperatureNoise = PerlinNoise(seed + 10)
     private val moistureNoise = PerlinNoise(seed + 20)
     private val continentalnessNoise = PerlinNoise(seed + 30)
-    private val rarityNoise = PerlinNoise(seed + 40) // Szum do globalnej rzadkości biomów
+    private val rarityNoise = PerlinNoise(seed + 40)
 
-    // Bazowe skale szumów
-    private val baseClimateScale = 0.001 // Zmniejszone biomy (częstsza zmiana)
+    private val baseClimateScale = 0.001
     private val baseContinentalScale = 0.001
-    private val baseRarityScale = 0.0014 // Skalowanie rzadkości dostosowane do wielkości biomów
-    
+    private val baseRarityScale = 0.0014
+
     private val caveBiomeNoise = PerlinNoise(seed + 50)
     private val caveClimateScale = 0.02
 
     fun getBiome(wx: Int, wz: Int): Biome {
-        // 1. Pobieramy globalne wartości szumów
         val globalTemp = temperatureNoise.noise(wx * baseClimateScale, wz * baseClimateScale)
         val globalMoisture = moistureNoise.noise(wx * baseClimateScale, wz * baseClimateScale)
         val globalElevation = continentalnessNoise.noise(wx * baseContinentalScale, wz * baseContinentalScale)
         val globalRarity = rarityNoise.noise(wx * baseRarityScale, wz * baseRarityScale)
 
-        // 2. BIOMY INNE (Mogą sąsiadować z każdym, zależne od wysokości/rzadkości)
         if (globalElevation < -0.4) return Biomes.OCEAN
         if (globalElevation < -0.3) return Biomes.BEACH
-        
-        // Rzadki szczyt jako "biom inny" - pojawia się bardzo rzadko na wysokich terenach
+
         if (globalElevation > 0.4 && (globalRarity + 0.5) / 1.0 > Biomes.RARE_MOUNTAIN_PEAK.rarityThreshold) {
             return Biomes.RARE_MOUNTAIN_PEAK
         }
 
-        // 3. PODZIAŁ NA STREFY (Gwarantuje poprawne sąsiedztwo klimatyczne)
-        // Snowy (< -0.3) <-> Cold (-0.3 do 0.0) <-> Temperate (0.0 do 0.4) <-> Warm (> 0.4)
-        
         return when {
-            globalTemp < -0.3 -> { // --- BIOMY OŚNIEŻONE ---
+            globalTemp < -0.3 -> {
                 if (globalMoisture > 0.0) Biomes.SNOWY_TAIGA else Biomes.SNOWY_TUNDRA
             }
-            
-            globalTemp < 0.0 -> { // --- BIOMY ZIMNE ---
-                // Tutaj sprawdzamy rzadkość występowania specyficznych gór
+            globalTemp < 0.0 -> {
                 val normalizedRarity = (globalRarity + 0.7) / 1.4
                 if (normalizedRarity > Biomes.MOUNTAIN_TAIGA.rarityThreshold && globalMoisture > -0.1) {
                     Biomes.MOUNTAIN_TAIGA
                 } else if (normalizedRarity > Biomes.MOUNTAIN_MEADOW.rarityThreshold) {
                     Biomes.MOUNTAIN_MEADOW
                 } else {
-                    // Jeśli góry są "zbyt rzadkie" w tym punkcie, dajemy biom przejściowy (np. tundra)
-                    Biomes.SNOWY_TUNDRA 
+                    Biomes.SNOWY_TUNDRA
                 }
             }
-            
-            globalTemp < 0.4 -> { // --- BIOMY UMIARKOWANE ---
-                // Obsługa MINI_BIOMU (rzadki i gęsty las)
+            globalTemp < 0.4 -> {
                 val normalizedRarity = (globalRarity + 0.7) / 1.4
                 if (normalizedRarity > Biomes.MINI_FOREST.rarityThreshold) {
-                    // Dla mini-biomów przeliczamy lokalną wilgotność z ich własną skalą
                     val localScale = baseClimateScale * Biomes.MINI_FOREST.sizeScaleModifier
                     val localMoisture = moistureNoise.noise(wx * localScale, wz * localScale)
                     if (localMoisture > 0.1) return Biomes.MINI_FOREST
                 }
-                
                 if (globalMoisture > 0.0) Biomes.FOREST else Biomes.PLAINS
             }
-            
-            else -> { // --- BIOMY CIEPŁE ---
+            else -> {
                 if (globalMoisture > -0.1) Biomes.SAVANNA else Biomes.DESERT
             }
         }
     }
 
-    fun getCaveBiome(wx: Int, wy: Int, wz: Int): CaveBiome {
-        val n = caveBiomeNoise.noise(wx * caveClimateScale, wy * caveClimateScale, wz * caveClimateScale)
-        return when {
-            n > 0.3 -> Biomes.LUSH_CAVE
-            n < -0.3 -> Biomes.DRIPSTONE_CAVE
-            else -> Biomes.DEFAULT_CAVE
-        }
-    }
-}
+    fun getCaveBiome(wx: Int, wy: Int, wz: Int, zone: Int): CaveBiome {
+        val candidates = listOf(Biomes.DARK_CAVE, Biomes.LUSH_CAVE, Biomes.DRIPSTONE_CAVE)
+            .filter { zone >= it.minZone && zone <= it.maxZone }
 
-/**
- * Klasa pomocnicza do definiowania warunków dla biomu.
- * Upraszcza logikę wyboru biomu w BiomeProvider.
- */
-data class BiomeCondition(
-    val biome: Biome,
-    val tempRange: ClosedRange<Double>,
-    val moistureRange: ClosedRange<Double>,
-    val elevationRange: ClosedRange<Double>? = null // Opcjonalny zakres wysokości (dla gór, dolin itp.)
-) {
-    fun matches(temp: Double, moisture: Double, elevation: Double): Boolean {
-        return temp in tempRange && moisture in moistureRange && (elevationRange == null || elevation in elevationRange)
+        var bestBiome = Biomes.DEFAULT_CAVE
+        var maxScore = -1.0
+
+        for (biome in candidates) {
+            // Używamy skali biomu - mniejsza skala = rzadsze zmiany = większy biom
+            val n = caveBiomeNoise.noise(wx * caveClimateScale * biome.scale, wy * caveClimateScale * biome.scale, wz * caveClimateScale * biome.scale)
+            
+            val threshold = 1.0 - (biome.rarity * 2.0) // Przeliczamy rzadkość na próg szumu
+            if (n > threshold) {
+                val score = n - threshold
+                if (score > maxScore) {
+                    maxScore = score
+                    bestBiome = biome
+                }
+            }
+        }
+        return bestBiome
     }
 }
 
@@ -153,7 +141,6 @@ open class ChunkGenerator(
     val oreColors: MutableSet<Int>
 ) {
     val noise = PerlinNoise(seed)
-    val caveNoise = PerlinNoise(seed + 1)
     val biomeProvider = BiomeProvider(seed)
 
     val BLOCK_ID_AIR = 0
@@ -169,15 +156,15 @@ open class ChunkGenerator(
     open fun generate(cx: Int, cz: Int): Chunk {
         val chunk = Chunk(cx, cz)
 
-        // 1. GENERACJA POWIERZCHNI (Bez wpływu jaskiń)
+        // 1. GENERACJA POWIERZCHNI
         for (lx in 0 until 16) {
             for (lz in 0 until 16) {
                 val wx = cx * 16 + lx
                 val wz = cz * 16 + lz
                 val biome = biomeProvider.getBiome(wx, wz)
                 val h = getTerrainHeight(wx, wz)
-                
-                chunk.setBlock(lx, 0, lz, Color.BLACK.rgb) // Bedrock
+
+                chunk.setBlock(lx, 0, lz, Color.BLACK.rgb)
                 for (y in 1..127) {
                     val block = getSurfaceBlock(y, h, biome)
                     if (block != BLOCK_ID_AIR) {
@@ -187,36 +174,22 @@ open class ChunkGenerator(
             }
         }
 
-        // 2. GENERACJA JASKIŃ (Rzeźbienie w postawionym terenie) //zaraz naprawiamy to dziadostwo
-        for (lx in 0 until 16) {
-            for (lz in 0 until 16) {
-                val wx = cx * 16 + lx
-                val wz = cz * 16 + lz
-                val h = getTerrainHeight(wx, wz)
-                
-                carveCaves(chunk, lx, lz, wx, wz, h)
-            }
-        }
-        //chwilowe komplikacje nastały - globalne uziemienie kodu
-        // 2. Generowanie rud
+        // 2. GENERACJA JASKIŃ (Nowy silnik czysto algorytmiczny)
+        carveCaves(chunk, cx, cz)
+
+        // 3. Generowanie dodatków
         generateOres(chunk, cx, cz)
-
-        // 3. Generowanie jezior lawy
         generateLavaLakes(chunk, cx, cz)
-
-        // 4. Generowanie struktur na bazie biomów i globalnych
         generateBiomeStructures(chunk, cx, cz)
-        generateStructureType(chunk, cx, cz, DungeonModel, 0.0001, 0, 30, Color(0x8EA3A1).rgb, 1, true, listOf(0, 90, 180, 270))
-        generateStructureType(chunk, cx, cz, IglooModel, 0.00005, 52, 80, Biomes.SNOWY_TUNDRA.surfaceColor, 0, false, listOf(0, 90, 180, 270))
+        generateStructureType(chunk, cx, cz, DungeonModel, 0.0001, 0, 30, Color(0x8EA3A1).rgb, 1, true, listOf(0, 90, 180, 270), false)
+        generateStructureType(chunk, cx, cz, IglooModel, 0.00005, 52, 80, Biomes.SNOWY_TUNDRA.surfaceColor, 0, false, listOf(0, 90, 180, 270), true)
 
         chunk.modified = false
         return chunk
     }
 
     open fun getTerrainHeight(wx: Int, wz: Int): Int {
-        // Zwiększony promień i gęstsze próbkowanie (9 punktów zamiast 5)
-        // To eliminuje "ściany" poprzez łagodniejsze mieszanie baseHeight
-        val radius = 8 
+        val radius = 8
         var totalBaseHeight = 0.0
         var totalHeightVariation = 0.0
         var weightSum = 0.0
@@ -224,7 +197,6 @@ open class ChunkGenerator(
         for (dx in -radius..radius step radius) {
             for (dz in -radius..radius step radius) {
                 val b = biomeProvider.getBiome(wx + dx, wz + dz)
-                // Odległość od środka jako waga (środek ma największy wpływ)
                 val weight = 1.0 / (sqrt((dx * dx + dz * dz).toDouble()) + 1.0)
                 totalBaseHeight += b.baseHeight * weight
                 totalHeightVariation += b.heightVariation * weight
@@ -240,62 +212,255 @@ open class ChunkGenerator(
         return calculatedHeight.toInt().coerceIn(0, 127)
     }
 
-    // Czysta logika powierzchni
     private fun getSurfaceBlock(wy: Int, terrainHeight: Int, biome: Biome): Int {
         if (wy > terrainHeight) {
             return if (wy <= SEA_LEVEL) BLOCK_ID_WATER else BLOCK_ID_AIR
         }
-        
         val stoneDepth = 4
         return when {
             wy == terrainHeight -> if (terrainHeight >= SEA_LEVEL) biome.surfaceColor else biome.subsurfaceColor
             wy > terrainHeight - stoneDepth -> biome.subsurfaceColor
-            else -> Color(0x8EA3A1).rgb // Stone
+            else -> Color(0x8EA3A1).rgb
         }
     }
 
-    // Czysta logika jaskiń
-    private fun carveCaves(chunk: Chunk, lx: Int, lz: Int, wx: Int, wz: Int, terrainHeight: Int) {
-        // Zwiększamy częstotliwość dla mniejszych, bardziej "pokręconych" korytarzy
-        val frequency = 0.05 
-        // Próg dla "spaghetti" - im mniejszy, tym węższe tunele (efekt robaka)
-        val tunnelThreshold = 0.14
-        val surfaceOpeningResistance = 0.15
+    /**
+     * Zwiększamy promień wyszukiwania jaskiń do 7 chunków (standard dla dobrej topologii),
+     * aby tunele miały odpowiedni bufor na naturalne zakończenie biegu.
+     */
+    private fun carveCaves(chunk: Chunk, cx: Int, cz: Int) {
+        val range = 5 // Balans: wystarczająco dużo, by widzieć systemy, ale nie całą mapę
 
-        for (y in 1..terrainHeight) {
-            // Technika "Double Noise" dla jaskiń typu 1.12:
-            // Tworzymy dwie "wstęgi" szumu. Tam gdzie się przecinają, powstaje tunel.
-            val n1 = caveNoise.noise(wx * frequency, y * frequency, wz * frequency)
-            val n2 = caveNoise.noise(wx * frequency + 100.0, y * frequency + 100.0, wz * frequency + 100.0)
-            
-            // Połączenie dwóch szumów tworzy okrągły przekrój tunelu
-            val combinedNoise = Math.sqrt(n1 * n1 + n2 * n2)
-            
-            val depth = terrainHeight - y
-            
-            // Dynamiczne zwężanie tuneli przy powierzchni
-            val currentCaveWidth = if (depth < 12) {
-                (tunnelThreshold - surfaceOpeningResistance * (1.0 - depth / 12.0)).coerceAtLeast(0.0)
-            } else {
-                tunnelThreshold
-            }
+        for (szumX in cx - range..cx + range) {
+            for (szumZ in cz - range..cz + range) {
+                val rand = java.util.Random((szumX * 341873128712L + szumZ * 132897987541L + seed).hashCode().toLong())
 
-            // Jeśli wypadkowa dwóch szumów jest mała, wycinamy blok
-            if (combinedNoise < currentCaveWidth) {
-                chunk.setBlock(lx, y, lz, BLOCK_ID_AIR)
-                
-                // Fundamenty pod biomy jaskiniowe: Malowanie podłogi jaskini
-                // Jeśli blok pod nami (y-1) jest kamieniem, zmieńmy go na kolor biomu jaskiniowego
-                if (y > 1 && chunk.getBlock(lx, y - 1, lz) != BLOCK_ID_AIR) {
-                    val caveBiome = biomeProvider.getCaveBiome(wx, y, wz)
-                    if (caveBiome != Biomes.DEFAULT_CAVE) {
-                        chunk.setBlock(lx, y - 1, lz, caveBiome.floorColor)
+                // Zwiększamy nieco szansę na start kolumny jaskiń
+                val numSystems = if (rand.nextInt(100) < 18) rand.nextInt(3) + 1 else 0
+
+                repeat(numSystems) {
+                    val anchorX = (szumX * 16 + rand.nextInt(16)).toDouble()
+                    val anchorZ = (szumZ * 16 + rand.nextInt(16)).toDouble()
+
+                    // Dynamika wysokości oparta na terenie
+                    val surfaceH = getTerrainHeight(anchorX.toInt(), anchorZ.toInt())
+                    val bedrockY = 8.0
+                    val totalPlayableDepth = surfaceH - bedrockY
+                    val zoneSize = totalPlayableDepth / 3.0
+
+                    // Losujemy strefę dla tego konkretnego systemu
+                    val zone = rand.nextInt(3) // 0: Bottom, 1: Middle, 2: Top
+                    
+                    val minY = bedrockY + (zone * zoneSize)
+                    val maxY = minY + zoneSize
+                    val anchorY = minY + rand.nextDouble() * (maxY - minY)
+
+                    // --- PARAMETRYZACJA STREF ---
+                    var cheeseChance = 0
+                    var cheeseSizeMult = 1.0
+                    var forceDownwards = false
+
+                    when (zone) {
+                        0 -> { cheeseChance = 7; cheeseSizeMult = 1.6 } // Dół: Bardzo duże i częste jaskinie
+                        1 -> { cheeseChance = 3; cheeseSizeMult = 0.8 } // Środek: Mniejsze i rzadsze
+                        2 -> { cheeseChance = 0; forceDownwards = true } // Góra: Brak wielkich komór, tylko tunele
+                    }
+
+                    // GENERACJA CHEESE CAVES (Duże komory)
+                    if (cheeseChance > 0 && rand.nextInt(10) < cheeseChance) {
+                        val baseRoomRadius = (rand.nextDouble() * 5.0 + 5.0) * cheeseSizeMult
+                        val subSpheres = rand.nextInt(3) + 3
+
+                        repeat(subSpheres) {
+                            val dx = (rand.nextDouble() - 0.5) * baseRoomRadius * 0.7
+                            val dy = (rand.nextDouble() - 0.5) * baseRoomRadius * 0.4
+                            val dz = (rand.nextDouble() - 0.5) * baseRoomRadius * 0.7
+                            val r = baseRoomRadius * (0.8 + rand.nextDouble() * 0.4)
+
+                            carveStructuralSphere(chunk, cx, cz, anchorX + dx, anchorY + dy, anchorZ + dz, r, 1.35, zone)
+                        }
+                    }
+
+                    // GENERACJA SPAGHETTI CAVES (Tunele)
+                    val spaghettiCount = if (zone == 2) rand.nextInt(2) + 1 else rand.nextInt(2) + 1
+                    repeat(spaghettiCount) {
+                        // Jeśli to strefa górna, wymuszamy pitch w dół na starcie
+                        val startPitch = if (forceDownwards) -0.5f - (rand.nextFloat() * 0.5f) else null
+                        generateAndCarveTunnel(chunk, cx, cz, anchorX, anchorY, anchorZ, isNoodle = false, rand, range, startPitch, zone)
                     }
                 }
-                // Malowanie sufitu
-                if (y < 127 && chunk.getBlock(lx, y + 1, lz) != BLOCK_ID_AIR) {
-                    val caveBiome = biomeProvider.getCaveBiome(wx, y, wz)
-                    chunk.setBlock(lx, y + 1, lz, caveBiome.wallColor)
+            }
+        }
+    }
+
+    /**
+     * Zmodernizowana metoda wektorowa z wbudowaną kontrolą geometrii brzegowej.
+     */
+    private fun generateAndCarveTunnel(chunk: Chunk, cx: Int, cz: Int, startX: Double, startY: Double, startZ: Double, isNoodle: Boolean, rand: Random, range: Int, overridePitch: Float? = null, zone: Int) {
+        var px = startX
+        var py = startY
+        var pz = startZ
+
+        var yaw = rand.nextFloat() * Math.PI.toFloat() * 2.0f
+        var pitch = overridePitch ?: ((rand.nextFloat() - 0.5f) * 0.25f)
+
+        val steps = if (isNoodle) rand.nextInt(25) + 15 else rand.nextInt(50) + 40 // Skrócone tunele
+        val baseRadius = if (isNoodle) 1.2 else 2.8 // Nieco węższe główne tunele
+        val stepLength = if (isNoodle) 1.2 else 2.2 // Krótsze kroki to lepsza kontrola
+
+        var prevX = px
+        var prevY = py
+        var prevZ = pz
+        var prevR = baseRadius
+
+        // Maksymalny bezpieczny dystans od źródła, zanim uderzymy w horyzont generowania chunków
+        val maxAllowedDistance = (range - 1) * 16.0
+
+        for (step in 0 until steps) {
+            // 1. Bazowy promień z fluktuacją
+            var currentRadius = baseRadius + (Math.sin(step * 0.25) * (if (isNoodle) 0.15 else 0.7))
+
+            // 2. WYGŁADZANIE STARTU (Lejek dla skrzyżowań T-Kształtnych)
+            if (step < 8) {
+                val t = step / 8.0
+                currentRadius *= (2.0 - t)
+            }
+
+            // 3. WYGŁADZANIE KOŃCA (Zabezpieczenie przed tępą ścianą na końcu pętli)
+            if (step > steps - 8) {
+                val t = (steps - step) / 8.0 // Płynne schodzenie od 1.0 do 0.0
+                currentRadius *= t
+            }
+
+            // 4. BEZPIECZNIK CHUNKÓW (Zabezpieczenie przed brutalnym ucięciem na granicy zasięgu)
+            val distFromOriginX = px - startX
+            val distFromOriginZ = pz - startZ
+            val currentDist = sqrt(distFromOriginX * distFromOriginX + distFromOriginZ * distFromOriginZ)
+            val fadeBuffer = 12.0 // Mniejszy bufor wygaszania
+
+            if (currentDist > maxAllowedDistance - fadeBuffer) {
+                // Gdy tunel zbliża się do krawędzi zasięgu na odległość fadeBuffer bloków,
+                // zaczynamy go drastycznie zwężać, wymuszając naturalne zamknięcie jaskini.
+                val t = ((maxAllowedDistance - currentDist) / fadeBuffer).coerceIn(0.0, 1.0)
+                currentRadius *= t
+            }
+
+            // Interpolacja sub-krokowa segmentu
+            val segmentDist = sqrt((px - prevX) * (px - prevX) + (py - prevY) * (py - prevY) + (pz - prevZ) * (pz - prevZ))
+            val subSteps = floor(segmentDist * 1.5).toInt().coerceAtLeast(1)
+
+            for (i in 0 until subSteps) {
+                val alpha = i.toDouble() / subSteps
+                val ix = prevX + (px - prevX) * alpha
+                val iy = prevY + (py - prevY) * alpha
+                val iz = prevZ + (pz - prevZ) * alpha
+                val ir = prevR + (currentRadius - prevR) * alpha
+
+                if (ir > 0.1) { // Rzeźbimy tylko gdy promień ma sensowną wielkość
+                    carveStructuralSphere(chunk, cx, cz, ix, iy, iz, ir, if (isNoodle) 1.0 else 1.2, zone)
+                }
+            }
+
+            // NOODLE CAVES (Odnogi szczelinowe)
+            if (!isNoodle && step > 12 && rand.nextInt(40) == 0 && currentRadius > 1.5) {
+                generateAndCarveTunnel(chunk, cx, cz, px, py, pz, isNoodle = true, rand = rand, range = range, zone = zone)
+            }
+
+            // Przejście wektora
+            prevX = px
+            prevY = py
+            prevZ = pz
+            prevR = currentRadius
+
+            val hDist = Math.cos(pitch.toDouble())
+            px += Math.cos(yaw.toDouble()) * hDist * stepLength
+            py += Math.sin(pitch.toDouble()) * stepLength
+            pz += Math.sin(yaw.toDouble()) * hDist * stepLength
+
+            pitch *= 0.6f // Szybsze prostowanie w pionie
+            pitch += (rand.nextFloat() - rand.nextFloat()) * 0.25f
+            yaw += (rand.nextFloat() - rand.nextFloat()) * 0.45f // Zwiększona krętość (było 0.35)
+
+            if (py <= 5.0 || py >= 120.0) break
+        }
+    }
+
+    /**
+     * Rdzeń rzeźbiący kule/elipsoidy wewnątrz aktualnego chunka.
+     * Szum podziemny jest próbkowany oszczędnie: raz na całą kolumnę pionową geometrii.
+     */
+    private fun carveStructuralSphere(chunk: Chunk, currentCx: Int, currentCz: Int, centerX: Double, centerY: Double, centerZ: Double, radius: Double, yFlattening: Double, zone: Int) {
+        val stoneColor = Color(0x8EA3A1).rgb
+
+        val minX = floor(centerX - radius).toInt() - currentCx * 16
+        val maxX = floor(centerX + radius).toInt() - currentCx * 16
+        val minY = floor(centerY - radius / yFlattening).toInt()
+        val maxY = floor(centerY + radius / yFlattening).toInt()
+        val minZ = floor(centerZ - radius).toInt() - currentCz * 16
+        val maxZ = floor(centerZ + radius).toInt() - currentCz * 16
+
+        val radiusSq = radius * radius
+
+        for (lx in minX..maxX) {
+            if (lx !in 0..15) continue
+            val wx = currentCx * 16 + lx
+
+            for (lz in minZ..maxZ) {
+                if (lz !in 0..15) continue
+                val wz = currentCz * 16 + lz
+
+                val biome = biomeProvider.getBiome(wx, wz)
+                val baseCaveBiome = biomeProvider.getCaveBiome(wx, centerY.toInt().coerceIn(1, 126), wz, zone)
+
+                for (y in minY..maxY) {
+                    if (y <= 0 || y >= 127) continue
+
+                    val dx = (lx + currentCx * 16) - centerX
+                    val dz = (lz + currentCz * 16) - centerZ
+                    val dy = (y - centerY) * yFlattening
+
+                    if (dx * dx + dy * dy + dz * dz < radiusSq) {
+                        val currentBlock = chunk.getBlock(lx, y, lz)
+
+                        val isCarvable = currentBlock == stoneColor ||
+                                currentBlock == biome.surfaceColor ||
+                                currentBlock == biome.subsurfaceColor ||
+                                currentBlock == baseCaveBiome.floorColor ||
+                                currentBlock == baseCaveBiome.wallColor ||
+                                currentBlock == BLOCK_ID_AIR
+
+                        if (isCarvable && currentBlock != BLOCK_ID_WATER) {
+                            chunk.setBlock(lx, y, lz, BLOCK_ID_AIR)
+
+                            // Podłoga (Zabezpieczenie przed malowaniem w pustej przestrzeni)
+                            if (y > 1 && dx * dx + ((y - 1 - centerY) * yFlattening) * ((y - 1 - centerY) * yFlattening) + dz * dz >= radiusSq) {
+                                val below = chunk.getBlock(lx, y - 1, lz)
+                                if (below != BLOCK_ID_AIR && below != BLOCK_ID_WATER) {
+                                    chunk.setBlock(lx, y - 1, lz, baseCaveBiome.floorColor)
+                                }
+                            }
+
+                            // Sufit
+                            if (y < 126 && dx * dx + ((y + 1 - centerY) * yFlattening) * ((y + 1 - centerY) * yFlattening) + dz * dz >= radiusSq) {
+                                val above = chunk.getBlock(lx, y + 1, lz)
+                                if (above != BLOCK_ID_AIR && above != BLOCK_ID_WATER) {
+                                    if (baseCaveBiome == Biomes.DARK_CAVE) {
+                                        // Determinystyczny szum dla rzadkich świecących nacieków na suficie
+                                        val dripHash = (wx * 341873128712L + (y + 1) * 132897987541L + wz * 73856093L + seed).hashCode()
+                                        val dripVal = if (dripHash < 0) -dripHash else dripHash
+                                        
+                                        if (dripVal % 1000 == 0) { // Ok. 0.8% szansy na blok sufitu
+                                            chunk.setBlock(lx, y + 1, lz, 2)
+                                        } else {
+                                            chunk.setBlock(lx, y + 1, lz, baseCaveBiome.wallColor)
+                                        }
+                                    } else {
+                                        chunk.setBlock(lx, y + 1, lz, baseCaveBiome.wallColor)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -390,9 +555,10 @@ open class ChunkGenerator(
 
                 if (isLakeCenter(wx, wz)) {
                     val rand = Random((wx * 341873128712L + wz * 132897987541L + seed).hashCode().toLong())
-                    val surfaceY = rand.nextInt(10) + 4
-                    val radius = rand.nextDouble() * 3.0 + 2.5
-                    val maxDepth = rand.nextDouble() * 3.0 + 2.0
+                    // Zwiększamy zakres poszukiwań pionowych, by jeziora częściej trafiały na dno jaskiń
+                    val surfaceY = rand.nextInt(20) + 8
+                    val radius = rand.nextDouble() * 2.5 + 2.0 // Nieco mniejsze, bardziej naturalne
+                    val maxDepth = rand.nextDouble() * 1.5 + 1.5
                     placeLake(chunk, lx, surfaceY, lz, radius, maxDepth)
                 }
             }
@@ -402,18 +568,34 @@ open class ChunkGenerator(
     open fun isLakeCenter(wx: Int, wz: Int): Boolean {
         val hash = (wx * 73856093 xor wz * 19349663 xor seed).toString().hashCode()
         val random = Random(hash.toLong())
-        return random.nextDouble() < 0.0005
+        return random.nextDouble() < 0.0012 // Nieco częściej, bo niektóre zostaną anulowane przez brak gruntu
     }
 
     open fun placeLake(chunk: Chunk, centerLx: Int, surfaceY: Int, centerLz: Int, radius: Double, maxDepth: Double) {
         val stoneColor = Color(0x8EA3A1).rgb
-        val margin = 5.0
+
+        // 1. Grawitacja: szukamy podłoża dla jeziora
+        val checkLx = centerLx.coerceIn(0, 15)
+        val checkLz = centerLz.coerceIn(0, 15)
+        var floorY = surfaceY
+
+        // Skanujemy w dół w poszukiwaniu stałego bloku
+        while (floorY > 5 && chunk.getBlock(checkLx, floorY, checkLz) == BLOCK_ID_AIR) {
+            floorY--
+        }
+
+        // Jeśli jezioro wisi nad przepaścią lub trafiło na wodę - rezygnujemy z generacji
+        val blockBelow = chunk.getBlock(checkLx, floorY, checkLz)
+        if (blockBelow == BLOCK_ID_AIR || blockBelow == BLOCK_ID_WATER) return
+
+        val lakeLevelY = floorY
+        val margin = 4.0
         val minX = (centerLx - radius - margin).toInt().coerceIn(0, 15)
         val maxX = (centerLx + radius + margin).toInt().coerceIn(0, 15)
         val minZ = (centerLz - radius - margin).toInt().coerceIn(0, 15)
         val maxZ = (centerLz + radius + margin).toInt().coerceIn(0, 15)
-        val minY = (surfaceY - maxDepth - 3).toInt().coerceIn(1, 127)
-        val maxY = (surfaceY + 2).toInt().coerceIn(0, 127)
+        val minY = (lakeLevelY - maxDepth - 2).toInt().coerceIn(1, 127)
+        val maxY = (lakeLevelY + 2).toInt().coerceIn(1, 127)
 
         for (x in minX..maxX) {
             for (z in minZ..maxZ) {
@@ -425,26 +607,35 @@ open class ChunkGenerator(
                 val wx = chunk.x * 16 + x
                 val wz = chunk.z * 16 + z
 
-                val shapeNoise = noise.noise(wx * 0.2, wz * 0.2)
-                val effectiveRadius = radius + (shapeNoise * 2.0)
-                val wallRadius = effectiveRadius + 1.5
+                // Bardziej postrzępiony kształt
+                val shapeNoise = noise.noise(wx * 0.15, wz * 0.15) * 2.5
+                val effectiveRadius = radius + shapeNoise
+                val wallRadius = effectiveRadius + 1.2
 
-                val noiseVal = noise.noise(wx * 0.3, wz * 0.3)
-                val localDepth = maxDepth - (noiseVal * 1.5).coerceAtLeast(0.0)
+                // Zróżnicowana głębokość dna
+                val depthNoise = noise.noise(wx * 0.4, wz * 0.4)
+                val localDepth = (maxDepth + depthNoise * 1.5).coerceAtLeast(1.0)
 
                 for (y in minY..maxY) {
-                    if (effectiveRadius > 0 && dist < effectiveRadius) {
-                        if (y <= surfaceY && y >= surfaceY - localDepth) {
+                    if (dist < effectiveRadius) {
+                        // Wypełnienie lawą (płaska tafla na poziomie gruntu)
+                        if (y <= lakeLevelY && y > lakeLevelY - localDepth) {
                             chunk.setBlock(x, y, z, BLOCK_ID_LAVA)
                             chunk.setMeta(x, y, z, 8)
-                        } else if (y > surfaceY && y <= surfaceY + 1) {
-                            if (chunk.getBlock(x, y, z) != 0) chunk.setBlock(x, y, z, 0)
-                        } else if (y < surfaceY - localDepth) {
-                            if (chunk.getBlock(x, y, z) == 0) chunk.setBlock(x, y, z, stoneColor)
                         }
-                    } else if (wallRadius > 0 && dist < wallRadius) {
-                        if (y <= surfaceY && y >= surfaceY - localDepth) {
-                            if (chunk.getBlock(x, y, z) == 0) {
+                        // Mała nisza powietrzna nad taflą jeziora (by nie było "wmurowane")
+                        else if (y > lakeLevelY && y <= lakeLevelY + 1) {
+                            chunk.setBlock(x, y, z, BLOCK_ID_AIR)
+                        }
+                        // Uszczelnienie dna kamieniem
+                        else if (y <= lakeLevelY - localDepth && y >= lakeLevelY - localDepth - 1) {
+                            if (chunk.getBlock(x, y, z) != BLOCK_ID_AIR) chunk.setBlock(x, y, z, stoneColor)
+                        }
+                    }
+                    // Brzegi i ściany jeziorka (wymuszenie kamienia w pustych przestrzeniach)
+                    else if (dist < wallRadius) {
+                        if (y <= lakeLevelY && y >= lakeLevelY - localDepth) {
+                            if (chunk.getBlock(x, y, z) == BLOCK_ID_AIR) {
                                 chunk.setBlock(x, y, z, stoneColor)
                             }
                         }
@@ -454,7 +645,7 @@ open class ChunkGenerator(
         }
     }
 
-    open fun generateStructureType(chunk: Chunk, cx: Int, cz: Int, model: List<ModelVoxel>, density: Double, minH: Int, maxH: Int, targetBlock: Int, yOffset: Int, clearSpace: Boolean = false, allowedRotations: List<Int> = listOf(0)) {
+    open fun generateStructureType(chunk: Chunk, cx: Int, cz: Int, model: List<ModelVoxel>, density: Double, minH: Int, maxH: Int, targetBlock: Int, yOffset: Int, clearSpace: Boolean = false, allowedRotations: List<Int> = listOf(0), requireAirAbove: Boolean = true) {
         val margin = 10
         val modelCache = mutableMapOf<Int, List<ModelVoxel>>()
 
@@ -472,7 +663,8 @@ open class ChunkGenerator(
                     val h = getTerrainHeight(wx, wz)
 
                     for (y in startY..endY) {
-                        if (getSurfaceBlock(y, h, biome) == targetBlock && getSurfaceBlock(y + 1, h, biome) == BLOCK_ID_AIR) {
+                        val isTarget = getSurfaceBlock(y, h, biome) == targetBlock
+                        if (isTarget && (!requireAirAbove || getSurfaceBlock(y + 1, h, biome) == BLOCK_ID_AIR)) {
                             validYs.add(y)
                         }
                     }
@@ -633,7 +825,6 @@ class PerlinNoise(seed: Int) {
     }
     fun fade(t: Double) = t * t * t * (t * (t * 6 - 15) + 10)
     fun lerp(t: Double, a: Double, b: Double) = a + t * (b - a)
-    
     fun grad(hash: Int, x: Double, y: Double): Double {
         val u = if (hash and 1 == 0) x else -x
         val v = if (hash and 2 == 0) y else -y

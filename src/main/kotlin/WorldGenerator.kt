@@ -23,8 +23,15 @@ data class CaveBiome(
     val minZone: Int = 0,    // 0: dół, 1: środek, 2: góra
     val maxZone: Int = 2,
     val rarity: Double = 0.5, // 0.0 - 1.0 (im więcej, tym częściej)
-    val scale: Double = 1.0   // 1.0 to standard, <1.0 to większe biomy
-)
+    val scale: Double = 1.0,   // 1.0 to standard, <1.0 to większe biomy
+    val hasFloor: Boolean = true,
+    val hasCeiling: Boolean = true,
+    val hasWalls: Boolean = true,
+    val priority: Int = 0     // Wyższy priorytet nadpisuje niższy (tunele > ściany)
+) {
+    val effectiveHasCeiling: Boolean
+        get() = if (hasFloor && hasWalls) true else hasCeiling
+}
 
 object Biomes {
     private val GRASS_TEMPERATE = Color(0x59A608).rgb
@@ -35,11 +42,28 @@ object Biomes {
     private val SNOW = Color(0xFFFFFF).rgb
     private val STONE = Color(0x8EA3A1).rgb
 
+    // Grupy bloków
+    val GRASS_BLOCKS = listOf(
+        GRASS_TEMPERATE, GRASS_COLD, GRASS_SAVANNA
+    )
+    val DIRT_BLOCKS = listOf(DIRT)
+    val SAND_BLOCKS = listOf(SAND)
+    val SNOW_BLOCKS = listOf(SNOW)
+    val STONE_BLOCKS = listOf(STONE)
+
     // Biomy Jaskiniowe
-    val DEFAULT_CAVE = CaveBiome("Deep Caves", STONE, STONE, 0, 2, 1.0, 1.0)
-    val LUSH_CAVE = CaveBiome("Lush Caves", Color(0x3B5905).rgb, Color(0x59A608).rgb, 1, 2, 0.4, 1.2)
-    val DRIPSTONE_CAVE = CaveBiome("Dripstone", Color(0x4D3826).rgb, Color(0x4D3826).rgb, 0, 1, 0.4, 1.0)
-    val DARK_CAVE = CaveBiome("Dark Cave", Color(0x240A34).rgb , Color(0x240A34).rgb, 0, 0, 0.6, 0.4) // Tylko dół, skala 0.4 = wielkie obszary
+    val DEFAULT_CAVE = CaveBiome("Deep Caves", STONE, STONE, 0, 2, 1.0, 1.0, priority = 10)
+    val LUSH_CAVE = CaveBiome("Lush Caves", Color(0x3B5905).rgb, Color(0x59A608).rgb, 1, 2, 0.4, 1.2, priority = 10)
+    val DRIPSTONE_CAVE = CaveBiome("Dripstone", Color(0x4D3826).rgb, Color(0x4D3826).rgb, 0, 1, 0.4, 1.0, priority = 10)
+    val DARK_CAVE = CaveBiome("Dark Cave", Color(0x240A34).rgb , Color(0x240A34).rgb, 0, 0, 0.6, 0.4, priority = 10) // Tylko dół, skala 0.4 = wielkie obszary
+
+    // Nowe biomy z różnymi kombinacjami powierzchni
+    val ABYSS_FLOOR = CaveBiome("Abyss Floor", Color(0x1a1a1a).rgb, Color(0x2d1f1f).rgb, 0, 0, 0.5, 0.8, hasFloor = true, hasCeiling = false, hasWalls = false, priority = 1)
+    val HANGING_CEILING = CaveBiome("Hanging Ceiling", Color(0x4a3c2a).rgb, Color(0x4a3c2a).rgb, 1, 2, 0.4, 0.9, hasFloor = false, hasCeiling = true, hasWalls = false, priority = 1)
+    val WALL_TUNNEL = CaveBiome("Wall Tunnel", Color(0x5c4a3a).rgb, Color(0x5c4a3a).rgb, 0, 2, 0.3, 1.1, hasFloor = false, hasCeiling = false, hasWalls = true, priority = 1)
+    val FLOOR_CEILING = CaveBiome("Floor Ceiling", Color(0x3a4a3a).rgb, Color(0x4a5a4a).rgb, 0, 2, 0.35, 1.0, hasFloor = true, hasCeiling = true, hasWalls = false, priority = 5)
+    val FLOOR_WALLS = CaveBiome("Floor Walls", Color(0x4a3a2a).rgb, Color(0x5a4a3a).rgb, 0, 1, 0.4, 0.9, hasFloor = true, hasCeiling = false, hasWalls = true, priority = 8)
+    val CEILING_WALLS = CaveBiome("Ceiling Walls", Color(0x3a3a4a).rgb, Color(0x3a3a4a).rgb, 1, 2, 0.4, 0.9, hasFloor = false, hasCeiling = true, hasWalls = true, priority = 8)
 
     // 10 Głównych biomów
     val SNOWY_TUNDRA = Biome("Snowy Tundra", SNOW, DIRT, 58.0, 2.0, 0.0001, rarityThreshold = 0.0)
@@ -113,8 +137,11 @@ class BiomeProvider(val seed: Int) {
     }
 
     fun getCaveBiome(wx: Int, wy: Int, wz: Int, zone: Int): CaveBiome {
-        val candidates = listOf(Biomes.DARK_CAVE, Biomes.LUSH_CAVE, Biomes.DRIPSTONE_CAVE)
-            .filter { zone >= it.minZone && zone <= it.maxZone }
+        val candidates = listOf(
+            Biomes.DARK_CAVE, Biomes.LUSH_CAVE, Biomes.DRIPSTONE_CAVE,
+            Biomes.ABYSS_FLOOR, Biomes.HANGING_CEILING, Biomes.WALL_TUNNEL,
+            Biomes.FLOOR_CEILING, Biomes.FLOOR_WALLS, Biomes.CEILING_WALLS
+        ).filter { zone >= it.minZone && zone <= it.maxZone }
 
         var bestBiome = Biomes.DEFAULT_CAVE
         var maxScore = -1.0
@@ -122,10 +149,10 @@ class BiomeProvider(val seed: Int) {
         for (biome in candidates) {
             // Używamy skali biomu - mniejsza skala = rzadsze zmiany = większy biom
             val n = caveBiomeNoise.noise(wx * caveClimateScale * biome.scale, wy * caveClimateScale * biome.scale, wz * caveClimateScale * biome.scale)
-            
+
             val threshold = 1.0 - (biome.rarity * 2.0) // Przeliczamy rzadkość na próg szumu
             if (n > threshold) {
-                val score = n - threshold
+                val score = (n - threshold) + (biome.priority * 0.1) // Priorytet dodaje bonus do wyniku
                 if (score > maxScore) {
                     maxScore = score
                     bestBiome = biome
@@ -181,21 +208,21 @@ open class ChunkGenerator(
         generateOres(chunk, cx, cz)
         generateLavaLakes(chunk, cx, cz)
         generateBiomeStructures(chunk, cx, cz)
-        generateStructureType(chunk, cx, cz, DungeonModel, 0.0001, 0, 30, Color(0x8EA3A1).rgb, 1, true, listOf(0, 90, 180, 270), false)
-        generateStructureType(chunk, cx, cz, IglooModel, 0.00005, 52, 80, Biomes.SNOWY_TUNDRA.surfaceColor, 0, false, listOf(0, 90, 180, 270), true)
+        generateStructureType(chunk, cx, cz, DungeonModel, 0.0001, 0, 30, Biomes.STONE_BLOCKS, 1, true, listOf(0, 90, 180, 270), false)
+        generateStructureType(chunk, cx, cz, IglooModel, 0.00005, 52, 80, Biomes.SNOW_BLOCKS, 0, false, listOf(0, 90, 180, 270), true, listOf("Snowy Tundra", "Snowy Taiga"))
 
         chunk.modified = false
         return chunk
     }
 
     open fun getTerrainHeight(wx: Int, wz: Int): Int {
-        val radius = 8
+        val radius = 40
         var totalBaseHeight = 0.0
         var totalHeightVariation = 0.0
         var weightSum = 0.0
 
-        for (dx in -radius..radius step radius) {
-            for (dz in -radius..radius step radius) {
+        for (dx in -radius..radius step 6) {
+            for (dz in -radius..radius step 6) {
                 val b = biomeProvider.getBiome(wx + dx, wz + dz)
                 val weight = 1.0 / (sqrt((dx * dx + dz * dz).toDouble()) + 1.0)
                 totalBaseHeight += b.baseHeight * weight
@@ -250,7 +277,7 @@ open class ChunkGenerator(
 
                     // Losujemy strefę dla tego konkretnego systemu
                     val zone = rand.nextInt(3) // 0: Bottom, 1: Middle, 2: Top
-                    
+
                     val minY = bedrockY + (zone * zoneSize)
                     val maxY = minY + zoneSize
                     val anchorY = minY + rand.nextDouble() * (maxY - minY)
@@ -433,7 +460,7 @@ open class ChunkGenerator(
                             chunk.setBlock(lx, y, lz, BLOCK_ID_AIR)
 
                             // Podłoga (Zabezpieczenie przed malowaniem w pustej przestrzeni)
-                            if (y > 1 && dx * dx + ((y - 1 - centerY) * yFlattening) * ((y - 1 - centerY) * yFlattening) + dz * dz >= radiusSq) {
+                            if (baseCaveBiome.hasFloor && y > 1 && dx * dx + ((y - 1 - centerY) * yFlattening) * ((y - 1 - centerY) * yFlattening) + dz * dz >= radiusSq) {
                                 val below = chunk.getBlock(lx, y - 1, lz)
                                 if (below != BLOCK_ID_AIR && below != BLOCK_ID_WATER) {
                                     chunk.setBlock(lx, y - 1, lz, baseCaveBiome.floorColor)
@@ -441,21 +468,65 @@ open class ChunkGenerator(
                             }
 
                             // Sufit
-                            if (y < 126 && dx * dx + ((y + 1 - centerY) * yFlattening) * ((y + 1 - centerY) * yFlattening) + dz * dz >= radiusSq) {
+                            if (baseCaveBiome.effectiveHasCeiling && y < 126 && dx * dx + ((y + 1 - centerY) * yFlattening) * ((y + 1 - centerY) * yFlattening) + dz * dz >= radiusSq) {
                                 val above = chunk.getBlock(lx, y + 1, lz)
                                 if (above != BLOCK_ID_AIR && above != BLOCK_ID_WATER) {
                                     if (baseCaveBiome == Biomes.DARK_CAVE) {
                                         // Determinystyczny szum dla rzadkich świecących nacieków na suficie
                                         val dripHash = (wx * 341873128712L + (y + 1) * 132897987541L + wz * 73856093L + seed).hashCode()
                                         val dripVal = if (dripHash < 0) -dripHash else dripHash
-                                        
+
                                         if (dripVal % 1000 == 0) { // Ok. 0.8% szansy na blok sufitu
-                                            chunk.setBlock(lx, y + 1, lz, 2)
+                                            chunk.setBlock(lx, y + 1, lz, BLOCK_ID_LIGHT)
                                         } else {
                                             chunk.setBlock(lx, y + 1, lz, baseCaveBiome.wallColor)
                                         }
                                     } else {
                                         chunk.setBlock(lx, y + 1, lz, baseCaveBiome.wallColor)
+                                    }
+                                }
+                            }
+
+                            // Ściany (sprawdzamy 4 sąsiadów poziomych)
+                            if (baseCaveBiome.hasWalls) {
+                                // Ściana X-1
+                                if (lx > 0) {
+                                    val wallDx = (lx - 1 + currentCx * 16) - centerX
+                                    if (wallDx * wallDx + dy * dy + dz * dz >= radiusSq) {
+                                        val wallBlock = chunk.getBlock(lx - 1, y, lz)
+                                        if (wallBlock != BLOCK_ID_AIR && wallBlock != BLOCK_ID_WATER) {
+                                            chunk.setBlock(lx - 1, y, lz, baseCaveBiome.wallColor)
+                                        }
+                                    }
+                                }
+                                // Ściana X+1
+                                if (lx < 15) {
+                                    val wallDx = (lx + 1 + currentCx * 16) - centerX
+                                    if (wallDx * wallDx + dy * dy + dz * dz >= radiusSq) {
+                                        val wallBlock = chunk.getBlock(lx + 1, y, lz)
+                                        if (wallBlock != BLOCK_ID_AIR && wallBlock != BLOCK_ID_WATER) {
+                                            chunk.setBlock(lx + 1, y, lz, baseCaveBiome.wallColor)
+                                        }
+                                    }
+                                }
+                                // Ściana Z-1
+                                if (lz > 0) {
+                                    val wallDz = (lz - 1 + currentCz * 16) - centerZ
+                                    if (dx * dx + dy * dy + wallDz * wallDz >= radiusSq) {
+                                        val wallBlock = chunk.getBlock(lx, y, lz - 1)
+                                        if (wallBlock != BLOCK_ID_AIR && wallBlock != BLOCK_ID_WATER) {
+                                            chunk.setBlock(lx, y, lz - 1, baseCaveBiome.wallColor)
+                                        }
+                                    }
+                                }
+                                // Ściana Z+1
+                                if (lz < 15) {
+                                    val wallDz = (lz + 1 + currentCz * 16) - centerZ
+                                    if (dx * dx + dy * dy + wallDz * wallDz >= radiusSq) {
+                                        val wallBlock = chunk.getBlock(lx, y, lz + 1)
+                                        if (wallBlock != BLOCK_ID_AIR && wallBlock != BLOCK_ID_WATER) {
+                                            chunk.setBlock(lx, y, lz + 1, baseCaveBiome.wallColor)
+                                        }
                                     }
                                 }
                             }
@@ -645,7 +716,7 @@ open class ChunkGenerator(
         }
     }
 
-    open fun generateStructureType(chunk: Chunk, cx: Int, cz: Int, model: List<ModelVoxel>, density: Double, minH: Int, maxH: Int, targetBlock: Int, yOffset: Int, clearSpace: Boolean = false, allowedRotations: List<Int> = listOf(0), requireAirAbove: Boolean = true) {
+    open fun generateStructureType(chunk: Chunk, cx: Int, cz: Int, model: List<ModelVoxel>, density: Double, minH: Int, maxH: Int, targetBlocks: List<Int> = emptyList(), yOffset: Int, clearSpace: Boolean = false, allowedRotations: List<Int> = listOf(0), requireAirAbove: Boolean = true, allowedBiomes: List<String> = emptyList()) {
         val margin = 10
         val modelCache = mutableMapOf<Int, List<ModelVoxel>>()
 
@@ -662,8 +733,13 @@ open class ChunkGenerator(
                     val biome = biomeProvider.getBiome(wx, wz)
                     val h = getTerrainHeight(wx, wz)
 
+                    // Check biome restriction
+                    val biomeAllowed = allowedBiomes.isEmpty() || allowedBiomes.contains(biome.name)
+                    if (!biomeAllowed) continue
+
                     for (y in startY..endY) {
-                        val isTarget = getSurfaceBlock(y, h, biome) == targetBlock
+                        val surfaceBlock = getSurfaceBlock(y, h, biome)
+                        val isTarget = targetBlocks.isEmpty() || targetBlocks.contains(surfaceBlock)
                         if (isTarget && (!requireAirAbove || getSurfaceBlock(y + 1, h, biome) == BLOCK_ID_AIR)) {
                             validYs.add(y)
                         }

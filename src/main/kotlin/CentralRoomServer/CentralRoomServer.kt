@@ -3,6 +3,7 @@ package org.lewapnoob.KapeLuzServer
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
+import io.ktor.server.plugins.origin
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
@@ -63,8 +64,10 @@ fun Application.module() {
                                 val room = GameRoom(hostSession = this, hostId = mySessionId)
                                 rooms[newCode] = room
                                 currentRoomCode = newCode
+                                val hostIp = call.request.origin.remoteHost
 
-                                println("Utworzono pokój: $newCode (Host: $mySessionId)")
+                                // Zmieniony format wiadomości
+                                println("habitación creada: $newCode [Host: $mySessionId, IP: ${hostIp.substringBefore(".ipv4")}]")
                                 sendSerialized(SignalingMessage.RoomCreated(newCode))
                             }
 
@@ -149,7 +152,16 @@ fun Application.module() {
                                 }
                             }
 
-                            else -> {} // Ignoruj inne/błędy
+                            is SignalingMessage.IpEcho -> {
+                                // Pobieramy IP bezpośrednio z sesji WebSocket
+                                val clientIp = call.request.origin.remoteHost
+
+                                // Odsyłamy IP tym samym kanałem, co inne wiadomości
+                                sendSerialized(SignalingMessage.IpEchoResponse(clientIp))
+                                println("Wysłano echo IP dla klienta: $clientIp")
+                            }
+
+                            else -> { println("Ignoruję wiadomość: ${message}") } // Ignoruj inne/błędy
                         }
                     }
                 }

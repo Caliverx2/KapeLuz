@@ -35,7 +35,7 @@ data class Vector3d(var x: Double, var y: Double, var z: Double, var ao: Double 
 data class BlockPos(val x: Int, val y: Int, val z: Int)
 data class RayHit(val blockPos: BlockPos, val faceIndex: Int)
 data class Triangle3d(
-    val p1: Vector3d, val p2: Vector3d, val p3: Vector3d, val color: Color, val lightLevel: Int
+    val p1: Vector3d, val p2: Vector3d, val p3: Vector3d, val color: Color, val lightLevel: Int, val faceType: Int = -1
 )
 data class ModelVoxel(val x: Int, val y: Int, val z: Int, val color: Color, val isVoid: Boolean = false)
 
@@ -130,7 +130,7 @@ interface PlayerRenderer {
 }
 
 class KapeLuz(val playerName: String = "Player") : JPanel() {
-    val downscale = 8
+    val downscale = 4
     val baseCols = 1920 / downscale
     val baseRows = 1080 / downscale
     val cellSize = downscale/2
@@ -138,6 +138,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     val referenceHeight = (baseRows + 1) * cellSize
     val uiReferenceWidth = 960
     val uiReferenceHeight = 540
+    val version = "0.6"
 
     val cubeSize = 2.0
     var reachDistance = 5.0
@@ -217,10 +218,14 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     val BLOCK_ID_LIGHT = 2
     val BLOCK_ID_LAVA = 3
     val BLOCK_ID_WATER = 4
+    val BLOCK_ID_HALF_BLOCK = 5
+    val BLOCK_ID_STAIRS = 6
     var blockIdColors = mutableMapOf(
         BLOCK_ID_LIGHT to Color(0xFFFDD0).rgb,
         BLOCK_ID_LAVA to Color(0xFF8C00).rgb,
-        BLOCK_ID_WATER to Color(0.37f, 0.69f, 0.78f, 0.5f).rgb
+        BLOCK_ID_WATER to Color(0.37f, 0.69f, 0.78f, 0.5f).rgb,
+        BLOCK_ID_HALF_BLOCK to Color(0x8B4513).rgb,
+        BLOCK_ID_STAIRS to Color(0x8B4513).rgb
     )
     var fluidProperties = mutableMapOf(
         BLOCK_ID_LAVA to FluidProperties(tickRate = 30), // 1 aktualizacja na sekundę
@@ -327,56 +332,56 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
             // GŁOWA (8x8x8) - Texture (0,0) - Pivot ustawiony na styk z tułowiem
             val headCy = (21.5 * s) + modelFeetOffset
-            drawTexturedPart(game, (6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ,
                 8.0 * s, 8.0 * s, 8.0 * s, 0, 0, 8, 8, 8, hYaw, finalLightVal, tex, px, py, pz, hPitch, headCy - 4.0 * s)
             // GŁOWA (DRUGA WARSTWA - Hat)
-            drawTexturedPart(game, (6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, headCy, (6.0 * s) - modelCenterZ,
                 8.8 * s, 8.8 * s, 8.8 * s, 32, 0, 8, 8, 8, hYaw, finalLightVal, tex, px, py, pz, hPitch, headCy - 4.0 * s)
-            
+
             // TUŁÓW (8x12x4) - Texture (16,16)
-            drawTexturedPart(game, (6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 8.0 * s, 12.0 * s, 4.0 * s, 16, 16, 8, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
             // TUŁÓW (DRUGA WARSTWA - Jacket)
-            drawTexturedPart(game, (6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (6.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 8.8 * s, 13.2 * s, 4.4 * s, 16, 32, 8, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
 
             // PRAWA RĘKA (4x12x4) - Texture (40,16)
-            drawTexturedPart(game, (12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.0 * s, 12.0 * s, 4.0 * s, 40, 16, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
             // PRAWA RĘKA (DRUGA WARSTWA - Sleeve)
-            drawTexturedPart(game, (12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (12.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.4 * s, 13.2 * s, 4.4 * s, 40, 32, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
 
             // LEWA RĘKA (4x12x4) - Texture pos (32,48)
-            drawTexturedPart(game, (0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.0 * s, 12.0 * s, 4.0 * s, 32, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
             // LEWA RĘKA (DRUGA WARSTWA - Sleeve)
-            drawTexturedPart(game, (0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (0.0 * s) - modelCenterX, (11.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.4 * s, 13.2 * s, 4.4 * s, 48, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
 
             // PRAWA NOGA (4x12x4) - Texture (0,16)
-            drawTexturedPart(game, (8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.0 * s, 12.0 * s, 4.0 * s, 0, 16, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
             // PRAWA NOGA (DRUGA WARSTWA - Pants)
-            drawTexturedPart(game, (8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (8.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.4 * s, 13.2 * s, 4.4 * s, 0, 32, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
 
             // LEWA NOGA (4x12x4) - Texture (16,48)
-            drawTexturedPart(game, (4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.0 * s, 12.0 * s, 4.0 * s, 16, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
             // LEWA NOGA (DRUGA WARSTWA - Pants)
-            drawTexturedPart(game, (4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ, 
+            drawTexturedPart(game, (4.0 * s) - modelCenterX, (-0.5 * s) + modelFeetOffset, (6.0 * s) - modelCenterZ,
                 4.4 * s, 13.2 * s, 4.4 * s, 0, 48, 4, 12, 4, bYaw, finalLightVal, tex, px, py, pz)
         }
 
         private fun drawTexturedPart(
             game: KapeLuz, cx: Double, cy: Double, cz: Double, sx: Double, sy: Double, sz: Double,
-            tx: Int, ty: Int, tw: Int, th: Int, td: Int, 
+            tx: Int, ty: Int, tw: Int, th: Int, td: Int,
             partYaw: Double, lightVal: Int, tex: BufferedImage, px: Double, py: Double, pz: Double,
             partPitch: Double = 0.0, pivotY: Double = cy
         ) {
             val dx = sx / 2.0; val dy = sy / 2.0; val dz = sz / 2.0
-            
+
             // Definicja 8 wierzchołków sześcianu
             val corners = arrayOf(
                 Vector3d(cx - dx, cy - dy, cz - dz), // 0: Bottom-Left-Front (BLF)
@@ -574,7 +579,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     // Zmiana na ThreadPoolExecutor z kolejką priorytetową
     private val refreshExecutor = ThreadPoolExecutor(
         maxOf(2, nCores / 2), // Wykorzystujemy połowę rdzeni do meshowania
-        maxOf(2, nCores / 2), 
+        maxOf(2, nCores / 2),
         60L, TimeUnit.SECONDS,
         PriorityBlockingQueue<Runnable>(), // Używamy kolejki priorytetowej
         { r -> // ThreadFactory
@@ -843,7 +848,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         val mainMenu = uiManager.getPanel(GameState.MAIN_MENU)
         mainMenu.add(UIBackground(Color(30, 30, 30)))
         mainMenu.add(UIText(uiReferenceWidth/2, 60, "KapeLuż", 96f, Color.YELLOW, true))
-        mainMenu.add(UIText(10, 510, "KapeLuż 0.5", 20f, Color.WHITE))
+        mainMenu.add(UIText(10, 510, "KapeLuż $version", 20f, Color.WHITE))
 
         mainMenu.add(UIButton(uiReferenceWidth/2 - 200, 250, 400, 50, "Singleplayer") {
             gameState = GameState.WORLD_SELECTION
@@ -1444,10 +1449,17 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         }
 
         // Początkowy ekwipunek
-        addItem("#FF0000", 64); addItem("#00FF00", 64); addItem("#0000FF", 64)
-        addItem("$BLOCK_ID_LIGHT", 64); addItem("$BLOCK_ID_LAVA", 64); addItem("$BLOCK_ID_WATER", 64)
-        addItem("#FF000080", 32)
-        addItem("#00FF0080", 32)
+        addItem("#FF0000", 64)
+        addItem("#00FF00", 64)
+        addItem("#0000FF", 64)
+        addItem("$BLOCK_ID_LIGHT", 64)
+        addItem("$BLOCK_ID_LAVA", 64)
+        addItem("$BLOCK_ID_WATER", 64)
+        //addItem("$BLOCK_ID_STAIRS", 64)
+        //addItem("$BLOCK_ID_HALF_BLOCK", 64)
+        addItem("#FF000080", 64)
+        addItem("#00FF0080", 64)
+        addItem("#0000FF80", 64)
 
         // Generowanie gwiazd (jeśli jeszcze nie ma)
         if (stars.isEmpty()) {
@@ -1586,7 +1598,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     networkActionQueue.add {
                         val bufferCopy = ByteBuffer.wrap(dataCopy)
                         if (bufferCopy.remaining() == 0) return@add
-                        // Jeśli jesteśmy klientem i jeszcze nie wysłaliśmy nicku, robimy to teraz, 
+                        // Jeśli jesteśmy klientem i jeszcze nie wysłaliśmy nicku, robimy to teraz,
                         // bo wiemy, że połączenie działa (właśnie coś odebraliśmy).
                         if (!isHost && !hasSentPlayerInfo) {
                             println("Client: Connection confirmed. Sending playerName: $playerName to host.")
@@ -1857,9 +1869,9 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                                     for (b in data.blocks) if (b != 0) { chunk.hasBlocks = true; break }
                                 }
 
-                            // Wstępne oświetlenie sekcji, aby nie była czarna do czasu pełnego odświeżenia
-                            val l = calculateLighting(chunk)
-                            System.arraycopy(l, 0, chunk.light, 0, l.size)
+                                // Wstępne oświetlenie sekcji, aby nie była czarna do czasu pełnego odświeżenia
+                                val l = calculateLighting(chunk)
+                                System.arraycopy(l, 0, chunk.light, 0, l.size)
 
                                 // Odświeżamy mesh (można to zoptymalizować, ale na razie odświeżamy cały chunk)
                                 chunkExecutor.submit {
@@ -2171,12 +2183,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     // (Wymagałoby iteracji, ale generator zwykle zwraca niepusty teren).
                     // Zakładamy, że generator terenu zawsze coś tworzy (np. bedrock), więc hasBlocks=true.
                     newChunk.hasBlocks = true
-                    
+
                     // PRE-LIGHT: Obliczamy oświetlenie ZANIM dodamy chunk do mapy.
                     // To całkowicie eliminuje efekt "czarnych chunków" po załadowaniu.
                     val l = calculateLighting(newChunk)
                     System.arraycopy(l, 0, newChunk.light, 0, l.size)
-                    
+
                     chunks[p] = newChunk
 
                     // --- LOAD ENTITIES ---
@@ -2208,7 +2220,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     // refreshChunkData zajmie się nowym chunkiem ORAZ jego sąsiadami,
                     // zapewniając poprawne oświetlenie i usunięcie "szwów".
                     // Ta funkcja jest kosztowna, ale już jest w wątku tła, więc nie powoduje lagów.
-                    
+
                     // Priorytetyzujemy chunki blisko gracza
                     val distSq = (p.x - currentChunkX) * (p.x - currentChunkX) + (p.y - currentChunkZ) * (p.y - currentChunkZ)
                     val highPriority = distSq <= 4
@@ -2277,10 +2289,10 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                 val p = Point(cx, cz)
                 val chunk = chunks[p] ?: continue
                 if (!chunk.hasBlocks) continue
-                
+
                 val mesh = chunkMeshes[p]
                 val occlusion = chunkOcclusion[p]
-                
+
                 // Jeśli brakuje mesha LUB danych okluzji dla załadowanego chunka -> napraw go
                 if (mesh == null || occlusion == null) {
                     refreshChunkData(cx, cz, isHighPriority = true)
@@ -2345,7 +2357,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         for (dx in -1..1) {
             for (dz in -1..1) {
                 val p = Point(cx + dx, cz + dz)
-                chunks[p]?.let { 
+                chunks[p]?.let {
                     area.add(it)
                     areaPoints.add(p)
                 }
@@ -2379,7 +2391,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                 updateChunkMesh(cx + dx, cz + dz)
             }
         }
-        
+
         // 4. SIGNAL - Powiadomienie renderera o zmianach
         visibilityGraphDirty = true
     }
@@ -2552,12 +2564,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         fun importLight(nx: Int, ny: Int, nz: Int, idx: Int, neighbor: Chunk) {
             val nPt = Point(neighbor.x, neighbor.z)
             // FIX: Jeśli mamy już nowsze dane oświetlenia w workingBuffers, używamy ich zamiast live data
-            val nVal = workingBuffers[nPt]?.let { 
-                it[neighbor.getIndex(nx, ny, nz)].toInt() and 0xFF 
+            val nVal = workingBuffers[nPt]?.let {
+                it[neighbor.getIndex(nx, ny, nz)].toInt() and 0xFF
             } ?: neighbor.getLight(nx, ny, nz)
 
-            val nSky = (nVal shr 4) and 0xF 
-            val nBlock = nVal and 0xF 
+            val nSky = (nVal shr 4) and 0xF
+            val nBlock = nVal and 0xF
 
             val myVal = newLight[idx].toInt() and 0xFF
             var mySky = (myVal shr 4) and 0xF
@@ -3209,6 +3221,8 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
     private fun isOpaqueForCulling(blockId: Int): Boolean {
         if (blockId == 0) return false // air
         if (fluidBlocks.contains(blockId)) return false // fluid
+        if (blockId == BLOCK_ID_HALF_BLOCK) return false // half blocks don't occlude full faces
+        if (blockId == BLOCK_ID_STAIRS) return false // stairs don't occlude full faces
 
         val displayColor = Color(getBlockDisplayColor(blockId), true)
         // An unassigned ID will result in alpha=0, so it will be considered not opaque.
@@ -3350,6 +3364,9 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     var isFluid = false
                     var myLevel = 0
                     var amIFull = false
+                    var isHalfBlock = false
+                    var isStairs = false
+                    var bottomHeight = 0.0
 
                     if (fluidBlocks.contains(rawBlock)) {
                         isFluid = true
@@ -3360,6 +3377,25 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                         val blockAbove = if (y < 127) chunk.getBlock(lx, y + 1, lz) else 0
                         amIFull = (blockAbove == rawBlock)
                         height = if (amIFull) 1.0 else (myLevel / 9.0).coerceAtLeast(0.1)
+                    } else if (rawBlock == BLOCK_ID_HALF_BLOCK) {
+                        isHalfBlock = true
+                        val rawMeta = chunk.getMeta(lx, y, lz) and 0xF
+                        // Meta 0 = dolna połowa, 1 = górna połowa
+                        if (rawMeta == 1) {
+                            height = 1.0
+                            bottomHeight = 0.5
+                        } else {
+                            height = 0.5
+                            bottomHeight = 0.0
+                        }
+                    } else if (rawBlock == BLOCK_ID_STAIRS) {
+                        isStairs = true
+                        val rawMeta = chunk.getMeta(lx, y, lz) and 0xF
+                        // Meta 0-3: kierunek schodów (0=south, 1=east, 2=north, 3=west)
+                        // Meta 4-7: odwrócone schody (góra/dół)
+                        // Dla uproszczenia, renderujemy jako pół blok z pełną wysokością
+                        height = 1.0
+                        bottomHeight = 0.0
                     }
 
                     // Helper do decydowania czy rysować ściankę BOCZNĄ (uwzględnia różnice poziomów płynów)
@@ -3382,8 +3418,13 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                         if (neighborIsTransparent) { // Neighbor is transparent (air, fluid, or transparent solid)
                             val currentIsTransparent = !isOpaqueForCulling(rawBlock)
                             if (currentIsTransparent) { // Current is also a transparent solid
-                                // Render only if neighbor is air or fluid, not another transparent solid.
-                                return neighborId == 0 || fluidBlocks.contains(neighborId)
+                                // EXCEPTION: Always render if current or neighbor is a half block or stairs (incomplete blocks)
+                                if (rawBlock == BLOCK_ID_HALF_BLOCK || rawBlock == BLOCK_ID_STAIRS) return true
+                                if (neighborId == BLOCK_ID_HALF_BLOCK || neighborId == BLOCK_ID_STAIRS) return true
+                                // Render only if neighbor is air or fluid, or if colors are different
+                                if (neighborId == 0 || fluidBlocks.contains(neighborId)) return true
+                                // Different colored transparent blocks should show a face
+                                return getBlockDisplayColor(rawBlock) != getBlockDisplayColor(neighborId)
                             }
                             // Current is opaque, neighbor is transparent. Render.
                             return true
@@ -3421,8 +3462,13 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                         if (neighborIsTransparent) { // Neighbor is transparent (air, fluid, or transparent solid)
                             val currentIsTransparent = !isOpaqueForCulling(rawBlock)
                             if (currentIsTransparent) { // Current is also a transparent solid
-                                // Render only if neighbor is air or fluid, not another transparent solid.
-                                return neighborId == 0 || fluidBlocks.contains(neighborId)
+                                // EXCEPTION: Always render if current or neighbor is a half block or stairs (incomplete blocks)
+                                if (rawBlock == BLOCK_ID_HALF_BLOCK || rawBlock == BLOCK_ID_STAIRS) return true
+                                if (neighborId == BLOCK_ID_HALF_BLOCK || neighborId == BLOCK_ID_STAIRS) return true
+                                // Render only if neighbor is air or fluid, or if colors are different
+                                if (neighborId == 0 || fluidBlocks.contains(neighborId)) return true
+                                // Different colored transparent blocks should show a face
+                                return getBlockDisplayColor(rawBlock) != getBlockDisplayColor(neighborId)
                             }
                             // Current is opaque, neighbor is transparent. Render.
                             return true
@@ -3435,13 +3481,56 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     // 2. Dla bloków stałych: Wyłączamy AO jeśli sąsiadują z płynem (żeby uniknąć ciemnych rogów przy wodzie).
                     fun shouldDisableAO(nx: Int, ny: Int, nz: Int) = isFluid || fluidBlocks.contains(getRawBlockLocal(nx, ny, nz)) // Używamy lokalnego cache
 
-                    // Sprawdzamy sąsiadów
-                    if (shouldRenderSide(wx, y, wz - 1)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 0, color, isFluid, height, getNeighborHeight(wx, y, wz - 1), shouldDisableAO(wx, y, wz - 1)) // Z-
-                    if (shouldRenderSide(wx, y, wz + 1)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 1, color, isFluid, height, getNeighborHeight(wx, y, wz + 1), shouldDisableAO(wx, y, wz + 1)) // Z+
-                    if (shouldRenderSide(wx - 1, y, wz)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 2, color, isFluid, height, getNeighborHeight(wx - 1, y, wz), shouldDisableAO(wx - 1, y, wz)) // X-
-                    if (shouldRenderSide(wx + 1, y, wz)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 3, color, isFluid, height, getNeighborHeight(wx + 1, y, wz), shouldDisableAO(wx + 1, y, wz)) // X+
-                    if (shouldRenderCap(wx, y + 1, wz, true)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 4, color, isFluid, height, 0.0, shouldDisableAO(wx, y + 1, wz)) // Y+
-                    if (shouldRenderCap(wx, y - 1, wz, false)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 5, color, false, height, 0.0, shouldDisableAO(wx, y - 1, wz)) // Y-
+                    // Custom rendering for stairs
+                    if (isStairs) {
+                        val rawMeta = chunk.getMeta(lx, y, lz) and 0xF
+                        val direction = rawMeta and 0x3 // 0=south, 1=east, 2=north, 3=west
+                        val isInverted = (rawMeta and 0x4) != 0
+
+                        renderStairs(getTargetList(), wx, y, wz, xPos, yPos, zPos, color, direction, isInverted)
+                    } else {
+                        // Standard rendering for normal blocks, half blocks, and fluids
+                        val actualBottomHeight = if (isHalfBlock) bottomHeight else 0.0
+
+                        // Helper do obliczania bottomHeight dla ścianek bocznych płynów
+                        fun getSideBottomHeight(nx: Int, ny: Int, nz: Int): Double {
+                            if (!isFluid) return actualBottomHeight
+                            val nId = getRawBlockLocal(nx, ny, nz)
+                            if (nId == rawBlock) {
+                                // Sąsiad to ten sam płyn - używamy jego wysokości jako dolnej krawędzi
+                                return getNeighborHeight(nx, ny, nz)
+                            }
+                            return actualBottomHeight
+                        }
+
+                        // Sprawdzamy sąsiadów
+                        fun getFluidInset(nx: Int, ny: Int, nz: Int): Double {
+                            if (!isFluid) return 0.0
+                            val nId = getRawBlockLocal(nx, ny, nz)
+                            if (nId == BLOCK_ID_HALF_BLOCK || nId == BLOCK_ID_STAIRS) {
+                                return 0.005 * cubeSize // Minimalne cofnięcie, likwiduje Z-fighting
+                            }
+                            return 0.0
+                        }
+
+                        // Sprawdza czy sąsiad jest półprzeźroczystym blokiem stałym (nie air, nie płyn)
+                        fun neighborIsTranslucent(nx: Int, ny: Int, nz: Int): Boolean {
+                            if (!isFluid) return false
+                            val nId = getRawBlockLocal(nx, ny, nz)
+                            if (nId == 0 || fluidBlocks.contains(nId)) return false // air lub płyn - nie jest półprzeźroczystym blokiem stałym
+                            if (nId == BLOCK_ID_HALF_BLOCK || nId == BLOCK_ID_STAIRS) return true
+                            val displayColor = Color(getBlockDisplayColor(nId), true)
+                            return displayColor.alpha < 255
+                        }
+
+                        // Podmień wywołania addFace na dole pętli:
+                        if (shouldRenderSide(wx, y, wz - 1)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 0, color, isFluid, height, getSideBottomHeight(wx, y, wz - 1), shouldDisableAO(wx, y, wz - 1), getFluidInset(wx, y, wz - 1), neighborIsTranslucent(wx, y, wz - 1)) // Z-
+                        if (shouldRenderSide(wx, y, wz + 1)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 1, color, isFluid, height, getSideBottomHeight(wx, y, wz + 1), shouldDisableAO(wx, y, wz + 1), getFluidInset(wx, y, wz + 1), neighborIsTranslucent(wx, y, wz + 1)) // Z+
+                        if (shouldRenderSide(wx - 1, y, wz)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 2, color, isFluid, height, getSideBottomHeight(wx - 1, y, wz), shouldDisableAO(wx - 1, y, wz), getFluidInset(wx - 1, y, wz), neighborIsTranslucent(wx - 1, y, wz)) // X-
+                        if (shouldRenderSide(wx + 1, y, wz)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 3, color, isFluid, height, getSideBottomHeight(wx + 1, y, wz), shouldDisableAO(wx + 1, y, wz), getFluidInset(wx + 1, y, wz), neighborIsTranslucent(wx + 1, y, wz)) // X+
+                        if (shouldRenderCap(wx, y + 1, wz, true)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 4, color, isFluid, height, actualBottomHeight, shouldDisableAO(wx, y + 1, wz), getFluidInset(wx, y + 1, wz), neighborIsTranslucent(wx, y + 1, wz)) // Y+
+                        if (shouldRenderCap(wx, y - 1, wz, false)) addFace(getTargetList(), wx, y, wz, xPos, yPos, zPos, 5, color, isFluid, height, actualBottomHeight, shouldDisableAO(wx, y - 1, wz), getFluidInset(wx, y - 1, wz), neighborIsTranslucent(wx, y - 1, wz)) // Y-
+                    }
                 }
             }
         }
@@ -3506,18 +3595,40 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
         return occlusion
     }
 
-    private fun addFace(target: MutableList<Triangle3d>, wx: Int, wy: Int, wz: Int, x: Double, y: Double, z: Double, faceType: Int, c: Color, isDoubleSided: Boolean = false, topHeight: Double = 1.0, bottomHeight: Double = 0.0, disableAO: Boolean = false) {
-        // Rozmiar kostki = cubeSize (od -cubeSize/2 do +cubeSize/2 względem środka)
-        val d = cubeSize / 2.0
+    private fun addFace(
+        target: MutableList<Triangle3d>, wx: Int, wy: Int, wz: Int,
+        x: Double, y: Double, z: Double, faceType: Int, c: Color,
+        isDoubleSided: Boolean = false, topHeight: Double = 1.0,
+        bottomHeight: Double = 0.0, disableAO: Boolean = false,
+        inset: Double = 0.0, neighborIsTranslucent: Boolean = false
+    ) {
         // Obliczamy górną krawędź na podstawie wysokości płynu
-        val topY = y - d + (cubeSize * topHeight)
-        val bottomY = y - d + (cubeSize * bottomHeight)
+        val d = cubeSize / 2.0
+        var topY = y - d + (cubeSize * topHeight)
+        var bottomY = y - d + (cubeSize * bottomHeight)
+
+        var xMin = x - d
+        var xMax = x + d
+        var zMin = z - d
+        var zMax = z + d
+
+        // Cofa ścianę do wewnątrz bloku w zależności od tego, która to ściana
+        if (inset > 0.0) {
+            when (faceType) {
+                0 -> zMin += inset // Front (Z-)
+                1 -> zMax -= inset // Back (Z+)
+                2 -> xMin += inset // Left (X-)
+                3 -> xMax -= inset // Right (X+)
+                4 -> topY -= inset // Top (Y+)
+                5 -> bottomY += inset // Bottom (Y-)
+            }
+        }
 
         val p = arrayOf(
-            Vector3d(x - d, bottomY, z - d), Vector3d(x + d, bottomY, z - d), // 0, 1
-            Vector3d(x + d, topY, z - d), Vector3d(x - d, topY, z - d), // 2, 3 (Top)
-            Vector3d(x - d, bottomY, z + d), Vector3d(x + d, bottomY, z + d), // 4, 5
-            Vector3d(x + d, topY, z + d), Vector3d(x - d, topY, z + d)  // 6, 7 (Top)
+            Vector3d(xMin, bottomY, zMin), Vector3d(xMax, bottomY, zMin),
+            Vector3d(xMax, topY, zMin), Vector3d(xMin, topY, zMin),
+            Vector3d(xMin, bottomY, zMax), Vector3d(xMax, bottomY, zMax),
+            Vector3d(xMax, topY, zMax), Vector3d(xMin, topY, zMax)
         )
 
         fun vertexAO(s1: Boolean, s2: Boolean, corner: Boolean): Double {
@@ -3538,12 +3649,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             val v3 = p[i3].copy().apply { this.ao = ao[2] * shade }
             val v4 = p[i4].copy().apply { this.ao = ao[3] * shade }
 
-            target.add(Triangle3d(v1, v2, v3, c, light))
-            target.add(Triangle3d(v1, v3, v4, c, light))
+            target.add(Triangle3d(v1, v2, v3, c, light, faceType))
+            target.add(Triangle3d(v1, v3, v4, c, light, faceType))
 
-            if (isDoubleSided) {
-                target.add(Triangle3d(v1, v3, v2, c, light))
-                target.add(Triangle3d(v1, v4, v3, c, light))
+            if (isDoubleSided && !neighborIsTranslucent) {
+                target.add(Triangle3d(v1, v3, v2, c, light, faceType))
+                target.add(Triangle3d(v1, v4, v3, c, light, faceType))
             }
         }
 
@@ -3614,6 +3725,71 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                 for (i in 0..3) aoValues[i] = vertexAO(v[i][0], v[i][1], v[i][2])
                 lightLevel = if (isDoubleSided) selfLight else getLight(wx, wy - 1, wz)
                 addTri(4, 5, 1, 0, 0.4, aoValues, lightLevel)
+            }
+        }
+    }
+
+    private fun renderStairs(target: MutableList<Triangle3d>, wx: Int, wy: Int, wz: Int, x: Double, y: Double, z: Double, c: Color, direction: Int, isInverted: Boolean) {
+        val d = cubeSize / 2.0
+        val light = getLight(wx, wy, wz)
+
+        // Funkcja pomocnicza budująca ścianę z zachowaniem poprawnego winding order (CCW patrząc od zewnątrz)
+        fun addFace(p1: Vector3d, p2: Vector3d, p3: Vector3d, p4: Vector3d, shade: Double) {
+            val v1 = p1.copy().apply { ao = shade }
+            val v2 = p2.copy().apply { ao = shade }
+            val v3 = p3.copy().apply { ao = shade }
+            val v4 = p4.copy().apply { ao = shade }
+            // Trójkąt 1: v1 -> v2 -> v3
+            target.add(Triangle3d(v1, v2, v3, c, light))
+            // Trójkąt 2: v1 -> v3 -> v4
+            target.add(Triangle3d(v1, v3, v4, c, light))
+        }
+
+        // Funkcja renderująca pełny lub częściowy prostopadłościan (AABB) o zadanych współrzędnych lokalnych
+        fun renderBox(xMin: Double, yMin: Double, zMin: Double, xMax: Double, yMax: Double, zMax: Double) {
+            // Mapowanie współrzędnych lokalnych (od -d do d) na globalne świata
+            val x1 = x + xMin; val x2 = x + xMax
+            val y1 = y + yMin; val y2 = y + yMax
+            val z1 = z + zMin; val z2 = z + zMax
+
+            // Dół (Y-) - patrzy w dół
+            addFace(Vector3d(x1, y1, z2), Vector3d(x2, y1, z2), Vector3d(x2, y1, z1), Vector3d(x1, y1, z1), 0.4)
+            // Góra (Y+) - patrzy w górę
+            addFace(Vector3d(x1, y2, z1), Vector3d(x2, y2, z1), Vector3d(x2, y2, z2), Vector3d(x1, y2, z2), 1.0)
+            // Przód (Z-) - patrzy w stronę ujemnego Z
+            addFace(Vector3d(x1, y1, z1), Vector3d(x2, y1, z1), Vector3d(x2, y2, z1), Vector3d(x1, y2, z1), 0.8)
+            // Tył (Z+) - patrzy w stronę dodatniego Z
+            addFace(Vector3d(x2, y1, z2), Vector3d(x1, y1, z2), Vector3d(x1, y2, z2), Vector3d(x2, y2, z2), 0.8)
+            // Lewo (X-) - patrzy w stronę ujemnego X
+            addFace(Vector3d(x1, y1, z2), Vector3d(x1, y1, z1), Vector3d(x1, y2, z1), Vector3d(x1, y2, z2), 0.6)
+            // Prawo (X+) - patrzy w stronę dodatniego X
+            addFace(Vector3d(x2, y1, z1), Vector3d(x2, y1, z2), Vector3d(x2, y2, z2), Vector3d(x2, y2, z1), 0.6)
+        }
+
+        // Wyznaczenie pionowych granic dla podstawy schodów i górnego stopnia
+        val baseMinY = if (isInverted) 0.0 else -d
+        val baseMaxY = if (isInverted) d else 0.0
+        val stepMinY = if (isInverted) -d else 0.0
+        val stepMaxY = if (isInverted) 0.0 else d
+
+        // 1. Renderowanie podstawy (zawsze zajmuje pełny rzut XZ: 1.0 x 0.5 x 1.0)
+        renderBox(-d, baseMinY, -d, d, baseMaxY, d)
+
+        // 2. Renderowanie górnego stopnia (zajmuje 1.0 x 0.5 x 0.5, pozycja zależy od kierunku)
+        // direction: 0 = South (Z+), 1 = East (X+), 2 = North (Z-), 3 = West (X-)
+        // W Minecraftcie schody "idą do góry" w stronę tylnej ściany (back face).
+        when (direction) {
+            0 -> { // South (Z+) - wyższy stopień jest na południu (dodatnie Z)
+                renderBox(-d, stepMinY, 0.0, d, stepMaxY, d)
+            }
+            1 -> { // East (X+) - wyższy stopień jest na wschodzie (dodatnie X)
+                renderBox(0.0, stepMinY, -d, d, stepMaxY, d)
+            }
+            2 -> { // North (Z-) - wyższy stopień jest na północy (ujemne Z)
+                renderBox(-d, stepMinY, -d, d, stepMaxY, 0.0)
+            }
+            3 -> { // West (X-) - wyższy stopień jest na zachodzie (ujemnym X)
+                renderBox(-d, stepMinY, -d, 0.0, stepMaxY, d)
             }
         }
     }
@@ -4557,7 +4733,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                         // --- OBLICZANIE LOKALNEGO BODY YAW (Minecraft-style rotation) ---
                         // 1. Gładkie centrowanie modelu do kierunku ruchu
                         val isMoving = inputManager.isKeyDown(KeyEvent.VK_W) || inputManager.isKeyDown(KeyEvent.VK_S) ||
-                                       inputManager.isKeyDown(KeyEvent.VK_A) || inputManager.isKeyDown(KeyEvent.VK_D)
+                                inputManager.isKeyDown(KeyEvent.VK_A) || inputManager.isKeyDown(KeyEvent.VK_D)
 
                         if (isMoving) {
                             var moveX = 0.0
@@ -5124,7 +5300,12 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
         // 4. Projekcja i Rasteryzacja (Bloki przezroczyste)
         // Sortowanie od tyłu do przodu dla poprawnego blendingu
-        transparentTrianglesToRaster.sortByDescending { (it.p1.z + it.p2.z + it.p3.z) / 3.0 }
+        // Najpierw po faceType (górne ściany wody przed bocznymi), potem po Z
+        transparentTrianglesToRaster.sortWith { t1, t2 ->
+            val faceCompare = t2.faceType.compareTo(t1.faceType)
+            if (faceCompare != 0) faceCompare
+            else ((t2.p1.z + t2.p2.z + t2.p3.z) / 3.0).compareTo((t1.p1.z + t1.p2.z + t1.p3.z) / 3.0)
+        }
 
         for (tri in transparentTrianglesToRaster) {
             val clippedTriangles = clipTriangleAgainstPlane(tri)
@@ -5599,8 +5780,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
             var pixelIndex = y * imageWidth + minX
 
             for (x in minX..maxX) {
-                // Zastosowanie bezpiecznego marginesu inkluzji
-                if (v >= -eps && w >= -eps && (v + w) <= 1.0 + eps) {
+                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip
@@ -5677,19 +5857,17 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
 
         var rowV = vStart
         var rowW = wStart
-        val eps = 0.0001 // Zabezpieczenie przed przerwami między chmurami
 
         for (y in minY..maxY) {
-            var v = rowV
-            var w = rowW
+            var v = rowV; var w = rowW
             var pixelIndex = y * imageWidth + minX
 
             for (x in minX..maxX) {
-                // Bezpieczny warunek barycentryczny
-                if (v >= -eps && w >= -eps && (v + w) <= 1.0 + eps) {
+                if (v >= 0.0 && w >= 0.0 && (v + w) <= 1.0) {
                     val u = 1.0 - v - w
                     val zRecip = u * z1Inv + v * z2Inv + w * z3Inv
                     val depth = 1.0 / zRecip
+
                     if (depth < zBuffer[y][x]) {
                         val bg = backBuffer[pixelIndex]
                         val newR = (r * alpha + ((bg shr 16) and 0xFF) * invAlpha).toInt()
@@ -5863,7 +6041,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                 output.add(current) // Oba w środku -> dodajemy obecny
             } else if (currIn && !prevIn) {
                 output.add(intersectPlane(prev, current, nearPlaneZ)) // Wchodzimy do środka -> punkt przecięcia + obecny
-            output.add(current) // Dodajemy obecny punkt
+                output.add(current) // Dodajemy obecny punkt
             } else if (!currIn && prevIn) {
                 output.add(intersectPlane(prev, current, nearPlaneZ)) // Wychodzimy na zewnątrz -> punkt przecięcia
             }
@@ -6235,15 +6413,15 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                         // Skorygowana interpolacja UV (Perspective Correct)
                         val u = (l1 * u1z + l2 * u2z + l3 * u3z) * depth
                         val v = (l1 * v1z + l2 * v2z + l3 * v3z) * depth
-                        
+
                         val tx = u.toInt().coerceIn(0, tex.width - 1)
                         val ty = v.toInt().coerceIn(0, tex.height - 1)
-                        
+
                         val argb = tex.getRGB(tx, ty)
                         if ((argb shr 24 and 0xFF) < 128) continue // Transparency cut-off
 
                         zBuffer[py][px] = depth
-                        
+
                         val baseColor = Color(argb)
                         val finalRGB = if (!debugFullbright) {
                             lightProcessor.process(
@@ -6257,11 +6435,11 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                         }
 
                         val ao = (l1 * ao1z + l2 * ao2z + l3 * ao3z) * depth
-                        
+
                         val r = (((finalRGB shr 16) and 0xFF) * ao).toInt()
                         val g = (((finalRGB shr 8) and 0xFF) * ao).toInt()
                         val b = ((finalRGB and 0xFF) * ao).toInt()
-                        
+
                         backBuffer[py * imageWidth + px] = (r shl 16) or (g shl 8) or b
                     }
                 }
@@ -7001,7 +7179,7 @@ class KapeLuz(val playerName: String = "Player") : JPanel() {
                     // Jeśli chunka pod nami nie ma, wyłączamy grawitację (lewitacja)
                     velocityY = 0.0
                     // Opcjonalnie: Stopujemy też ruch poziomy, żeby nie wbiec w niezaładowany teren
-                    // dx = 0.0; dz = 0.0 
+                    // dx = 0.0; dz = 0.0
                 }
             }
 

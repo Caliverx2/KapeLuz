@@ -92,4 +92,13 @@ sealed class SignalingMessage {
         val targetId: String? = null,
         val senderId: String? = null
     ) : SignalingMessage()
+
+    @Serializable
+    @SerialName("ip_echo")
+    data object IpEcho : SignalingMessage()
+
+    @Serializable
+    @SerialName("ip_echo_response")
+    data class IpEchoResponse(val ip: String) : SignalingMessage()
+
 }
